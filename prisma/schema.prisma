@@ -1,0 +1,159 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum VocabularySource {
+  STARTER
+  USER
+  LEGACY
+}
+
+enum PracticeMode {
+  WORD_READING
+  LISTEN_CHOOSE_MEANING
+  MEANING_CHOOSE_WORD
+  WORD_CHOOSE_MEANING
+  DICTATION
+  SENTENCE
+  DIALOGUE_TEXT
+  DIALOGUE_VOICE
+}
+
+enum LearningResult {
+  VIEWED
+  CORRECT
+  INCORRECT
+}
+
+model User {
+  id              String             @id @default(uuid())
+  wechatOpenId    String             @unique
+  nickname        String?
+  dailyScoreGoal  Int                @default(50)
+  sessions        Session[]
+  vocabularyItems VocabularyItem[]
+  practiceAttempts PracticeAttempt[]
+  wordProgress    WordProgress[]
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique
+  userId    String
+  expiresAt DateTime
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model StarterVocabulary {
+  id                String   @id @default(uuid())
+  key               String   @unique
+  category          String
+  english           String
+  normalizedEnglish String
+  chinese           String
+  phonetic          String?
+  sortOrder         Int
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([category, sortOrder])
+}
+
+model VocabularyItem {
+  id                String             @id @default(uuid())
+  userId            String
+  english           String
+  normalizedEnglish String
+  chinese           String
+  phonetic          String?
+  source            VocabularySource
+  sourceKey         String?
+  archivedAt        DateTime?
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  practiceAttempts  PracticeAttempt[]
+  progress          WordProgress?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@unique([userId, normalizedEnglish])
+  @@unique([userId, sourceKey])
+  @@index([userId, archivedAt])
+}
+
+model SentencePrompt {
+  id              String   @id @default(uuid())
+  key             String   @unique
+  targetWord      String
+  promptChinese   String
+  referenceAnswer String
+  acceptedAnswers String[]
+  explanation     String
+  sortOrder       Int
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model DialoguePrompt {
+  id              String   @id @default(uuid())
+  key             String   @unique
+  question        String
+  questionChinese String
+  referenceAnswer String
+  acceptedAnswers String[]
+  evaluationHint  String
+  sortOrder       Int
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model PracticeAttempt {
+  id               String          @id @default(uuid())
+  userId           String
+  vocabularyItemId String?
+  mode             PracticeMode
+  result           LearningResult
+  answerText       String?
+  recognizedText   String?
+  feedback         String?
+  semanticScore    Float?
+  pronunciationScore Float?
+  accuracyScore    Float?
+  fluencyScore     Float?
+  completenessScore Float?
+  user             User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vocabularyItem   VocabularyItem? @relation(fields: [vocabularyItemId], references: [id], onDelete: SetNull)
+  occurredAt       DateTime         @default(now())
+
+  @@index([userId, occurredAt])
+  @@index([vocabularyItemId])
+  @@index([mode, occurredAt])
+}
+
+model WordProgress {
+  userId           String
+  vocabularyItemId String         @unique
+  attemptCount     Int            @default(0)
+  correctCount     Int            @default(0)
+  incorrectCount   Int            @default(0)
+  lastPracticedAt  DateTime?
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vocabularyItem   VocabularyItem @relation(fields: [vocabularyItemId], references: [id], onDelete: Cascade)
+  updatedAt        DateTime       @updatedAt
+
+  @@id([userId, vocabularyItemId])
+  @@index([vocabularyItemId])
+}
