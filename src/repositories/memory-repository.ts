@@ -1,18 +1,27 @@
 import { randomUUID } from "node:crypto";
 import type {
   AttemptInput,
+  CheckInSummary,
   ChoiceQuestion,
   DashboardRecord,
   DialoguePromptRecord,
   IdentityContext,
+  LearningReport,
+  LearningReportMode,
+  ReviewItemStatus,
+  ReviewItemType,
+  ReviewOverview,
   PracticeAnswerInput,
   PracticeAnswerResult,
   SentencePromptRecord,
   SessionRecord,
   StarterWordRecord,
+  UserProfile,
   WordInput,
   WordRecord
 } from "../domain/types.js";
+import { currentStreakDays, shanghaiDateKey, shiftDateKey } from "../domain/date-key.js";
+import { buildReviewOverview } from "../domain/review.js";
 import { DAILY_SCORE_GOAL, scoreForAttempt } from "../domain/scoring.js";
 import { sentenceCanUseVocabulary } from "../domain/sentence-coverage.js";
 import { AppError } from "../lib/errors.js";
@@ -22,8 +31,17 @@ interface MemoryUser {
   id: string;
   openId: string;
   dailyScoreGoal: number;
+  nickname: string | null;
+  englishName: string | null;
+  avatarFileName: string | null;
   words: WordRecord[];
   attempts: Array<AttemptInput & { occurredAt: Date }>;
+  checkIns: string[];
+  reviewStates: Array<{
+    itemType: ReviewItemType;
+    itemKey: string;
+    masteredAt: Date | null;
+  }>;
 }
 
 const starterWordData = [
@@ -123,7 +141,18 @@ export class MemoryAppRepository implements AppRepository {
   async ensureIdentity(openId: string): Promise<IdentityContext> {
     let user = this.users.find((item) => item.openId === openId);
     if (!user) {
-      user = { id: randomUUID(), openId, dailyScoreGoal: 50, words: [], attempts: [] };
+      user = {
+        id: randomUUID(),
+        openId,
+        dailyScoreGoal: 50,
+        nickname: null,
+        englishName: null,
+        avatarFileName: null,
+        words: [],
+        attempts: [],
+        checkIns: [],
+        reviewStates: []
+      };
       this.users.push(user);
     }
     return { userId: user.id };
@@ -150,6 +179,30 @@ export class MemoryAppRepository implements AppRepository {
     return { userId };
   }
 
+  async getProfile(context: IdentityContext): Promise<UserProfile> {
+    const user = this.user(context);
+    return {
+      nickname: user.nickname,
+      englishName: user.englishName,
+      avatarPath: user.avatarFileName ? `/media/avatars/${user.avatarFileName}` : null
+    };
+  }
+
+  async updateProfile(
+    context: IdentityContext,
+    input: { nickname?: string; englishName?: string }
+  ): Promise<UserProfile> {
+    const user = this.user(context);
+    if (input.nickname !== undefined) user.nickname = input.nickname || null;
+    if (input.englishName !== undefined) user.englishName = input.englishName || null;
+    return this.getProfile(context);
+  }
+
+  async updateAvatar(context: IdentityContext, avatarFileName: string): Promise<UserProfile> {
+    this.user(context).avatarFileName = avatarFileName;
+    return this.getProfile(context);
+  }
+
   async getDashboard(context: IdentityContext): Promise<DashboardRecord> {
     const user = this.user(context);
     const startOfToday = new Date();
@@ -157,8 +210,9 @@ export class MemoryAppRepository implements AppRepository {
     const todayAttempts = user.attempts.filter((item) => item.occurredAt >= startOfToday);
     const correctAttempts = todayAttempts.filter((item) => item.result === "CORRECT");
     const starterCount = user.words.filter((item) => item.source === "STARTER").length;
+    const todayKey = shanghaiDateKey();
     return {
-      nickname: null,
+      nickname: user.nickname,
       wordCount: user.words.length,
       starterWordCount: starterCount,
       todayPracticeCount: todayAttempts.length,
@@ -171,9 +225,16 @@ export class MemoryAppRepository implements AppRepository {
       accuracy: todayAttempts.length
         ? Math.round((correctAttempts.length / todayAttempts.length) * 100)
         : 0,
+      checkedInToday: user.checkIns.includes(todayKey),
+      checkInDays: user.checkIns.length,
+      currentStreak: currentStreakDays(user.checkIns, todayKey),
+      weakWordCount: user.words.filter((word) => word.incorrectCount > 0).length,
+      pendingReviewCount: (await this.getReviewOverview(context)).pendingCount,
       modules: {
+        reading: user.words.length >= 1,
         choice: user.words.length >= 4,
         dictation: user.words.length >= 1,
+        pronunciation: user.words.length >= 1,
         sentence: starterCount >= 12,
         dialogue: starterCount >= 12
       }
@@ -187,6 +248,141 @@ export class MemoryAppRepository implements AppRepository {
     const user = this.user(context);
     user.dailyScoreGoal = dailyScoreGoal;
     return user.dailyScoreGoal;
+  }
+
+  async checkInToday(context: IdentityContext): Promise<CheckInSummary> {
+    const user = this.user(context);
+    const dateKey = shanghaiDateKey();
+    const firstCheckInToday = !user.checkIns.includes(dateKey);
+    if (firstCheckInToday) user.checkIns.push(dateKey);
+    const dashboard = await this.getDashboard(context);
+    return {
+      dateKey,
+      checkedInToday: true,
+      firstCheckInToday,
+      totalDays: user.checkIns.length,
+      currentStreak: currentStreakDays(user.checkIns, dateKey),
+      todayScore: dashboard.todayScore,
+      wordCount: dashboard.wordCount
+    };
+  }
+
+  async getLearningReport(context: IdentityContext): Promise<LearningReport> {
+    const user = this.user(context);
+    const generatedDate = shanghaiDateKey();
+    const gradedAttempts = user.attempts.filter((item) => item.result !== "VIEWED");
+    const correctAttempts = gradedAttempts.filter((item) => item.result === "CORRECT").length;
+    const recentDays = Array.from({ length: 7 }, (_, index) => {
+      const dateKey = shiftDateKey(generatedDate, index - 6);
+      const dayAttempts = gradedAttempts.filter(
+        (attempt) => shanghaiDateKey(attempt.occurredAt) === dateKey
+      );
+      return {
+        dateKey,
+        score: dayAttempts.reduce(
+          (total, attempt) => total + scoreForAttempt(attempt.mode, attempt.result),
+          0
+        ),
+        attempts: dayAttempts.length,
+        correct: dayAttempts.filter((attempt) => attempt.result === "CORRECT").length
+      };
+    });
+    const modeMap = new Map<LearningReportMode["mode"], LearningReportMode>();
+    for (const attempt of gradedAttempts) {
+      const current = modeMap.get(attempt.mode) || {
+        mode: attempt.mode,
+        attempts: 0,
+        correct: 0,
+        score: 0
+      };
+      current.attempts += 1;
+      current.correct += attempt.result === "CORRECT" ? 1 : 0;
+      current.score += scoreForAttempt(attempt.mode, attempt.result);
+      modeMap.set(attempt.mode, current);
+    }
+    const weakWords = user.words
+      .map((word) => {
+        const attemptCount = word.correctCount + word.incorrectCount;
+        return {
+          id: word.id,
+          english: word.english,
+          chinese: word.chinese,
+          phonetic: word.phonetic,
+          attemptCount,
+          correctCount: word.correctCount,
+          incorrectCount: word.incorrectCount,
+          accuracy: attemptCount ? Math.round((word.correctCount / attemptCount) * 100) : 0
+        };
+      })
+      .filter((word) => word.incorrectCount > 0 && word.accuracy < 80)
+      .sort(
+        (left, right) =>
+          right.incorrectCount - left.incorrectCount || left.accuracy - right.accuracy
+      )
+      .slice(0, 12);
+    return {
+      generatedDate,
+      wordCount: user.words.length,
+      totalCheckInDays: user.checkIns.length,
+      currentStreak: currentStreakDays(user.checkIns, generatedDate),
+      totalStudyDays: new Set(
+        user.attempts.map((attempt) => shanghaiDateKey(attempt.occurredAt))
+      ).size,
+      totalAttempts: gradedAttempts.length,
+      correctAttempts,
+      totalScore: gradedAttempts.reduce(
+        (total, attempt) => total + scoreForAttempt(attempt.mode, attempt.result),
+        0
+      ),
+      accuracy: gradedAttempts.length
+        ? Math.round((correctAttempts / gradedAttempts.length) * 100)
+        : 0,
+      masteredWordCount: user.words.filter((word) => {
+        const gradedCount = word.correctCount + word.incorrectCount;
+        return gradedCount >= 3 && (word.correctCount / gradedCount) * 100 >= 80;
+      }).length,
+      learningWordCount: user.words.filter((word) => word.attemptCount > 0).length,
+      recentDays,
+      modeStats: [...modeMap.values()].sort((left, right) => right.attempts - left.attempts),
+      weakWords
+    };
+  }
+
+  async getReviewOverview(context: IdentityContext): Promise<ReviewOverview> {
+    const user = this.user(context);
+    return buildReviewOverview(
+      user.attempts.map((attempt) => ({
+        ...attempt,
+        vocabularyItemId: attempt.vocabularyItemId || null,
+        exerciseKey: attempt.exerciseKey || null,
+        promptText: attempt.promptText || null,
+        referenceAnswer: attempt.referenceAnswer || null,
+        vocabularyItem: attempt.vocabularyItemId
+          ? user.words
+              .filter((word) => word.id === attempt.vocabularyItemId)
+              .map((word) => ({ english: word.english, chinese: word.chinese }))[0] || null
+          : null
+      })),
+      user.reviewStates
+    );
+  }
+
+  async setReviewStatus(
+    context: IdentityContext,
+    itemType: ReviewItemType,
+    itemKey: string,
+    status: ReviewItemStatus
+  ): Promise<void> {
+    const user = this.user(context);
+    const existing = user.reviewStates.find(
+      (state) => state.itemType === itemType && state.itemKey === itemKey
+    );
+    const masteredAt = status === "MASTERED" ? new Date() : null;
+    if (existing) {
+      existing.masteredAt = masteredAt;
+    } else {
+      user.reviewStates.push({ itemType, itemKey, masteredAt });
+    }
   }
 
   async listStarterWords(): Promise<StarterWordRecord[]> {
@@ -206,6 +402,7 @@ export class MemoryAppRepository implements AppRepository {
         source: "STARTER",
         attemptCount: 0,
         correctCount: 0,
+        incorrectCount: 0,
         lastPracticedAt: null
       });
       imported += 1;
@@ -215,6 +412,10 @@ export class MemoryAppRepository implements AppRepository {
 
   async listWords(context: IdentityContext): Promise<WordRecord[]> {
     return [...this.user(context).words];
+  }
+
+  async getWord(context: IdentityContext, wordId: string): Promise<WordRecord | null> {
+    return this.user(context).words.find((word) => word.id === wordId) || null;
   }
 
   async addWord(context: IdentityContext, input: WordInput): Promise<WordRecord> {
@@ -234,10 +435,19 @@ export class MemoryAppRepository implements AppRepository {
       source: "USER",
       attemptCount: 0,
       correctCount: 0,
+      incorrectCount: 0,
       lastPracticedAt: null
     };
     user.words.push(word);
     return word;
+  }
+
+  async addWords(context: IdentityContext, inputs: WordInput[]): Promise<WordRecord[]> {
+    const results: WordRecord[] = [];
+    for (const input of inputs) {
+      results.push(await this.addWord(context, input));
+    }
+    return results;
   }
 
   async updateWord(
@@ -275,11 +485,22 @@ export class MemoryAppRepository implements AppRepository {
   async getChoiceQuestions(
     context: IdentityContext,
     mode: ChoiceQuestion["mode"],
-    limit: number
+    limit: number,
+    scope: "all" | "weak" = "all"
   ): Promise<ChoiceQuestion[]> {
     const words = this.user(context).words;
     if (words.length < 4) throw new AppError(409, "NOT_ENOUGH_WORDS", "至少需要 4 个词汇");
-    return words.slice(0, limit).map((word) => ({
+    let targets = words;
+    if (scope === "weak") {
+      const review = await this.getReviewOverview(context);
+      const pending = new Set(
+        review.items
+          .filter((item) => item.type === "WORD" && item.status === "PENDING")
+          .map((item) => item.vocabularyItemId)
+      );
+      targets = words.filter((word) => pending.has(word.id));
+    }
+    return targets.slice(0, limit).map((word) => ({
       questionId: `${mode}:${word.id}`,
       mode,
       wordId: word.id,
@@ -290,10 +511,12 @@ export class MemoryAppRepository implements AppRepository {
             ? word.english
             : "听发音，选择正确的中文",
       audioText: mode === "LISTEN_CHOOSE_MEANING" ? word.english : null,
-      options: words.slice(0, 4).map((option) => ({
+      options: [word, ...words.filter((option) => option.id !== word.id)]
+        .slice(0, 4)
+        .map((option) => ({
         id: option.id,
         text: mode === "MEANING_CHOOSE_WORD" ? option.english : option.chinese
-      }))
+        }))
     }));
   }
 
@@ -311,7 +534,10 @@ export class MemoryAppRepository implements AppRepository {
       vocabularyItemId: word.id,
       mode: input.mode,
       result: correct ? "CORRECT" : "INCORRECT",
-      answerText: input.answerText || input.selectedWordId
+      answerText: input.answerText || input.selectedWordId,
+      exerciseKey: `word:${word.id}`,
+      promptText: word.english,
+      referenceAnswer: word.chinese
     });
     return {
       correct,
@@ -324,10 +550,25 @@ export class MemoryAppRepository implements AppRepository {
     };
   }
 
-  async listSentencePrompts(context: IdentityContext): Promise<SentencePromptRecord[]> {
+  async listSentencePrompts(
+    context: IdentityContext,
+    scope: "all" | "weak" = "all"
+  ): Promise<SentencePromptRecord[]> {
     if (!(await this.getDashboard(context)).modules.sentence) return [];
     const vocabulary = this.user(context).words.map((word) => word.english);
-    return sentencePrompts.filter((prompt) => sentenceCanUseVocabulary(prompt, vocabulary));
+    let prompts = sentencePrompts.filter((prompt) =>
+      sentenceCanUseVocabulary(prompt, vocabulary)
+    );
+    if (scope === "weak") {
+      const review = await this.getReviewOverview(context);
+      const pending = new Set(
+        review.items
+          .filter((item) => item.type === "SENTENCE" && item.status === "PENDING")
+          .map((item) => item.key)
+      );
+      prompts = prompts.filter((prompt) => pending.has(`sentence:${prompt.id}`));
+    }
+    return prompts;
   }
 
   async getSentencePrompt(
@@ -341,8 +582,19 @@ export class MemoryAppRepository implements AppRepository {
     return sentenceCanUseVocabulary(prompt, vocabulary) ? prompt : null;
   }
 
-  async listDialoguePrompts(context: IdentityContext): Promise<DialoguePromptRecord[]> {
-    return (await this.getDashboard(context)).modules.dialogue ? dialoguePrompts : [];
+  async listDialoguePrompts(
+    context: IdentityContext,
+    scope: "all" | "weak" = "all"
+  ): Promise<DialoguePromptRecord[]> {
+    if (!(await this.getDashboard(context)).modules.dialogue) return [];
+    if (scope !== "weak") return dialoguePrompts;
+    const review = await this.getReviewOverview(context);
+    const pending = new Set(
+      review.items
+        .filter((item) => item.type === "DIALOGUE" && item.status === "PENDING")
+        .map((item) => item.key)
+    );
+    return dialoguePrompts.filter((prompt) => pending.has(`dialogue:${prompt.id}`));
   }
 
   async getDialoguePrompt(
@@ -361,6 +613,7 @@ export class MemoryAppRepository implements AppRepository {
     if (!word) return;
     word.attemptCount += 1;
     if (input.result === "CORRECT") word.correctCount += 1;
+    if (input.result === "INCORRECT") word.incorrectCount += 1;
     word.lastPracticedAt = new Date();
   }
 

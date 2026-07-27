@@ -6,3 +6,4 @@ src/generated/prisma/
 coverage/
 *.log
 .backups/
+storage/

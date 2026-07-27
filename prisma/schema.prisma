@@ -34,13 +34,28 @@ model User {
   id              String             @id @default(uuid())
   wechatOpenId    String             @unique
   nickname        String?
+  englishName     String?
+  avatarFileName  String?
   dailyScoreGoal  Int                @default(50)
   sessions        Session[]
   vocabularyItems VocabularyItem[]
   practiceAttempts PracticeAttempt[]
   wordProgress    WordProgress[]
+  dailyCheckIns   DailyCheckIn[]
+  reviewItemStates ReviewItemState[]
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
+}
+
+model DailyCheckIn {
+  id        String   @id @default(uuid())
+  userId    String
+  dateKey   String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, dateKey])
+  @@index([userId, createdAt])
 }
 
 model Session {
@@ -134,6 +149,9 @@ model PracticeAttempt {
   accuracyScore    Float?
   fluencyScore     Float?
   completenessScore Float?
+  exerciseKey      String?
+  promptText       String?
+  referenceAnswer  String?
   user             User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   vocabularyItem   VocabularyItem? @relation(fields: [vocabularyItemId], references: [id], onDelete: SetNull)
   occurredAt       DateTime         @default(now())
@@ -141,6 +159,21 @@ model PracticeAttempt {
   @@index([userId, occurredAt])
   @@index([vocabularyItemId])
   @@index([mode, occurredAt])
+  @@index([userId, exerciseKey, occurredAt])
+}
+
+model ReviewItemState {
+  id          String   @id @default(uuid())
+  userId      String
+  itemType    String
+  itemKey     String
+  masteredAt  DateTime?
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, itemType, itemKey])
+  @@index([userId, masteredAt])
 }
 
 model WordProgress {

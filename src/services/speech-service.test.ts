@@ -25,7 +25,8 @@ const config: AppConfig = {
   zhipuPlatformApiKey: "",
   zhipuPlatformBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
   zhipuVisionModel: "glm-vision-test",
-  zhipuImageModel: "glm-image-test"
+  zhipuImageModel: "glm-image-test",
+  avatarStoragePath: "storage/test-avatars"
 };
 
 afterEach(() => {

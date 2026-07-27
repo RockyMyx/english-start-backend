@@ -22,6 +22,7 @@ export interface AppConfig {
   zhipuPlatformBaseUrl: string;
   zhipuVisionModel: string;
   zhipuImageModel: string;
+  avatarStoragePath: string;
 }
 
 function positiveNumber(value: string | undefined, fallback: number): number {
@@ -63,6 +64,7 @@ export function loadConfig(): AppConfig {
     zhipuPlatformBaseUrl:
       process.env.ZHIPU_PLATFORM_BASE_URL || "https://open.bigmodel.cn/api/paas/v4",
     zhipuVisionModel: process.env.ZHIPU_VISION_MODEL || "glm-4.6v-flash",
-    zhipuImageModel: process.env.ZHIPU_IMAGE_MODEL || "glm-image"
+    zhipuImageModel: process.env.ZHIPU_IMAGE_MODEL || "glm-image",
+    avatarStoragePath: process.env.AVATAR_STORAGE_PATH || "storage/avatars"
   };
 }

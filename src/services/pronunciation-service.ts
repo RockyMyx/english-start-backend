@@ -57,7 +57,8 @@ async function recognize(
 export async function assessVoiceAnswer(
   audio: Buffer,
   contentType: string,
-  config: AppConfig
+  config: AppConfig,
+  referenceText?: string
 ): Promise<VoiceEvaluation> {
   if (!config.azureSpeechKey || !config.azureSpeechRegion) {
     throw new AppError(
@@ -86,7 +87,7 @@ export async function assessVoiceAnswer(
     throw new AppError(422, "SPEECH_NOT_RECOGNIZED", "没有识别到清晰的英文，请重新录音");
   }
 
-  const assessment = await recognize(audio, contentType, config, recognizedText);
+  const assessment = await recognize(audio, contentType, config, referenceText || recognizedText);
   const score = assessment.NBest?.[0];
   return {
     recognizedText,
