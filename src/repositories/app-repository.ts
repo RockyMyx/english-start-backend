@@ -2,6 +2,8 @@ import type {
   AttemptInput,
   CheckInSummary,
   ChoiceQuestion,
+  DailyPlanRecord,
+  DailyPlanTaskKey,
   DashboardRecord,
   DialoguePromptRecord,
   IdentityContext,
@@ -37,6 +39,12 @@ export interface AppRepository {
   updateAvatar(context: IdentityContext, avatarFileName: string): Promise<UserProfile>;
   updateDailyScoreGoal(context: IdentityContext, dailyScoreGoal: number): Promise<number>;
   checkInToday(context: IdentityContext): Promise<CheckInSummary>;
+  getTodayDailyPlan(context: IdentityContext): Promise<DailyPlanRecord>;
+  getDailyPlanTaskWords(
+    context: IdentityContext,
+    planId: string,
+    taskKey: DailyPlanTaskKey
+  ): Promise<WordRecord[]>;
   getLearningReport(context: IdentityContext): Promise<LearningReport>;
   getReviewOverview(context: IdentityContext): Promise<ReviewOverview>;
   setReviewStatus(
@@ -60,7 +68,8 @@ export interface AppRepository {
     context: IdentityContext,
     mode: ChoiceQuestion["mode"],
     limit: number,
-    scope?: "all" | "weak"
+    scope?: "all" | "weak",
+    targetWordIds?: string[]
   ): Promise<ChoiceQuestion[]>;
   answerPractice(
     context: IdentityContext,

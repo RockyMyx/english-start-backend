@@ -25,9 +25,11 @@ export interface ReviewStateSnapshot {
   itemType: string;
   itemKey: string;
   masteredAt: Date | null;
+  reviewStage: number;
+  nextReviewAt: Date | null;
 }
 
-function itemTypeFor(attempt: ReviewAttemptSnapshot): ReviewItemType | null {
+export function itemTypeFor(attempt: ReviewAttemptSnapshot): ReviewItemType | null {
   if (attempt.vocabularyItemId) return "WORD";
   if (attempt.mode === "SENTENCE") return "SENTENCE";
   if (attempt.mode === "DIALOGUE_TEXT" || attempt.mode === "DIALOGUE_VOICE") {
@@ -36,7 +38,10 @@ function itemTypeFor(attempt: ReviewAttemptSnapshot): ReviewItemType | null {
   return null;
 }
 
-function itemKeyFor(attempt: ReviewAttemptSnapshot, type: ReviewItemType): string | null {
+export function itemKeyFor(
+  attempt: ReviewAttemptSnapshot,
+  type: ReviewItemType
+): string | null {
   if (type === "WORD" && attempt.vocabularyItemId) {
     return `word:${attempt.vocabularyItemId}`;
   }
@@ -49,7 +54,8 @@ function requiredStreak(type: ReviewItemType): number {
 
 export function buildReviewOverview(
   attempts: ReviewAttemptSnapshot[],
-  states: ReviewStateSnapshot[]
+  states: ReviewStateSnapshot[],
+  now = new Date()
 ): ReviewOverview {
   const groups = new Map<string, { type: ReviewItemType; key: string; attempts: ReviewAttemptSnapshot[] }>();
   for (const attempt of attempts) {
@@ -71,8 +77,7 @@ export function buildReviewOverview(
   for (const group of groups.values()) {
     group.attempts.sort((left, right) => left.occurredAt.getTime() - right.occurredAt.getTime());
     const wrong = group.attempts.filter((attempt) => attempt.result === "INCORRECT");
-    if (!wrong.length) continue;
-    const lastWrong = wrong[wrong.length - 1];
+    const lastWrong = wrong[wrong.length - 1] || group.attempts[0];
     const afterLastWrong = group.attempts.filter(
       (attempt) => attempt.occurredAt.getTime() > lastWrong.occurredAt.getTime()
     );
@@ -82,10 +87,17 @@ export function buildReviewOverview(
       correctStreak += 1;
     }
     const state = stateMap.get(`${group.type}:${group.key}`);
+    const scheduledForFuture =
+      !!state?.nextReviewAt && state.nextReviewAt.getTime() > now.getTime();
     const manuallyMastered =
-      !!state?.masteredAt && state.masteredAt.getTime() >= lastWrong.occurredAt.getTime();
-    const status: ReviewItemStatus =
-      manuallyMastered || correctStreak >= requiredStreak(group.type) ? "MASTERED" : "PENDING";
+      !!state?.masteredAt &&
+      !state.nextReviewAt &&
+      state.masteredAt.getTime() >= lastWrong.occurredAt.getTime();
+    const mastered =
+      manuallyMastered ||
+      (state ? state.reviewStage >= 5 : correctStreak >= requiredStreak(group.type));
+    if (scheduledForFuture && !mastered) continue;
+    const status: ReviewItemStatus = mastered ? "MASTERED" : "PENDING";
     const latest = group.attempts[group.attempts.length - 1];
     const word = latest.vocabularyItem || lastWrong.vocabularyItem;
     items.push({
@@ -108,12 +120,21 @@ export function buildReviewOverview(
       wrongCount: wrong.length,
       correctStreak,
       lastWrongAt: lastWrong.occurredAt,
+      nextReviewAt: state?.nextReviewAt || null,
+      reviewStage: state?.reviewStage || 0,
       modes: [...new Set(group.attempts.map((attempt) => attempt.mode))]
     });
   }
   items.sort((left, right) => right.lastWrongAt.getTime() - left.lastWrongAt.getTime());
   const types: ReviewItemType[] = ["WORD", "SENTENCE", "DIALOGUE"];
   return {
+    dueCount: items.filter((item) => item.status === "PENDING").length,
+    upcomingCount: states.filter(
+      (state) =>
+        state.reviewStage < 5 &&
+        !!state.nextReviewAt &&
+        state.nextReviewAt.getTime() > now.getTime()
+    ).length,
     pendingCount: items.filter((item) => item.status === "PENDING").length,
     masteredCount: items.filter((item) => item.status === "MASTERED").length,
     categories: types.map((type) => ({

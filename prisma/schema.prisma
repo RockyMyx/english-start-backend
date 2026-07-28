@@ -15,6 +15,7 @@ enum VocabularySource {
 
 enum PracticeMode {
   WORD_READING
+  WORD_PRONUNCIATION
   LISTEN_CHOOSE_MEANING
   MEANING_CHOOSE_WORD
   WORD_CHOOSE_MEANING
@@ -43,6 +44,7 @@ model User {
   wordProgress    WordProgress[]
   dailyCheckIns   DailyCheckIn[]
   reviewItemStates ReviewItemState[]
+  dailyPlans      DailyPlan[]
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
 }
@@ -152,28 +154,55 @@ model PracticeAttempt {
   exerciseKey      String?
   promptText       String?
   referenceAnswer  String?
+  dailyPlanId      String?
+  dailyTaskKey     String?
   user             User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   vocabularyItem   VocabularyItem? @relation(fields: [vocabularyItemId], references: [id], onDelete: SetNull)
+  dailyPlan        DailyPlan?       @relation(fields: [dailyPlanId], references: [id], onDelete: SetNull)
   occurredAt       DateTime         @default(now())
 
   @@index([userId, occurredAt])
   @@index([vocabularyItemId])
   @@index([mode, occurredAt])
   @@index([userId, exerciseKey, occurredAt])
+  @@index([dailyPlanId, dailyTaskKey, occurredAt])
 }
 
 model ReviewItemState {
-  id          String   @id @default(uuid())
-  userId      String
-  itemType    String
-  itemKey     String
-  masteredAt  DateTime?
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                 String         @id @default(uuid())
+  userId             String
+  itemType           String
+  itemKey            String
+  masteredAt         DateTime?
+  reviewStage        Int            @default(0)
+  intervalDays       Int            @default(0)
+  nextReviewAt       DateTime?
+  lastReviewedAt     DateTime?
+  lastResult         LearningResult?
+  lapseCount         Int            @default(0)
+  successfulDays     Int            @default(0)
+  user               User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
 
   @@unique([userId, itemType, itemKey])
   @@index([userId, masteredAt])
+  @@index([userId, nextReviewAt])
+}
+
+model DailyPlan {
+  id               String            @id @default(uuid())
+  userId           String
+  dateKey          String
+  tasks            Json
+  completedAt      DateTime?
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  practiceAttempts PracticeAttempt[]
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@unique([userId, dateKey])
+  @@index([userId, completedAt])
 }
 
 model WordProgress {

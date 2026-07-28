@@ -3,6 +3,9 @@ import type {
   AttemptInput,
   CheckInSummary,
   ChoiceQuestion,
+  DailyPlanRecord,
+  DailyPlanTask,
+  DailyPlanTaskKey,
   DashboardRecord,
   DialoguePromptRecord,
   IdentityContext,
@@ -24,6 +27,11 @@ import { currentStreakDays, shanghaiDateKey, shiftDateKey } from "../domain/date
 import { buildReviewOverview } from "../domain/review.js";
 import { DAILY_SCORE_GOAL, scoreForAttempt } from "../domain/scoring.js";
 import { sentenceCanUseVocabulary } from "../domain/sentence-coverage.js";
+import {
+  initialReviewSchedule,
+  updateReviewSchedule
+} from "../domain/spaced-repetition.js";
+import { buildWordMastery } from "../domain/word-mastery.js";
 import { AppError } from "../lib/errors.js";
 import type { AppRepository } from "./app-repository.js";
 
@@ -41,6 +49,19 @@ interface MemoryUser {
     itemType: ReviewItemType;
     itemKey: string;
     masteredAt: Date | null;
+    reviewStage: number;
+    intervalDays: number;
+    nextReviewAt: Date | null;
+    lastReviewedAt: Date | null;
+    lastResult: "VIEWED" | "CORRECT" | "INCORRECT" | null;
+    lapseCount: number;
+    successfulDays: number;
+  }>;
+  dailyPlans: Array<{
+    id: string;
+    dateKey: string;
+    tasks: DailyPlanTask[];
+    completedAt: Date | null;
   }>;
 }
 
@@ -151,7 +172,8 @@ export class MemoryAppRepository implements AppRepository {
         words: [],
         attempts: [],
         checkIns: [],
-        reviewStates: []
+        reviewStates: [],
+        dailyPlans: []
       };
       this.users.push(user);
     }
@@ -254,6 +276,19 @@ export class MemoryAppRepository implements AppRepository {
     const user = this.user(context);
     const dateKey = shanghaiDateKey();
     const firstCheckInToday = !user.checkIns.includes(dateKey);
+    if (firstCheckInToday) {
+      const todayAttempts = user.attempts.filter(
+        (attempt) =>
+          attempt.result !== "VIEWED" &&
+          shanghaiDateKey(attempt.occurredAt) === dateKey
+      );
+      const hasOutputPractice = todayAttempts.some((attempt) =>
+        ["SENTENCE", "DIALOGUE_TEXT", "DIALOGUE_VOICE"].includes(attempt.mode)
+      );
+      if (todayAttempts.length < 3 && !hasOutputPractice) {
+        throw new AppError(409, "LEARNING_REQUIRED", "完成一组有效练习后即可签到");
+      }
+    }
     if (firstCheckInToday) user.checkIns.push(dateKey);
     const dashboard = await this.getDashboard(context);
     return {
@@ -265,6 +300,131 @@ export class MemoryAppRepository implements AppRepository {
       todayScore: dashboard.todayScore,
       wordCount: dashboard.wordCount
     };
+  }
+
+  async getTodayDailyPlan(context: IdentityContext): Promise<DailyPlanRecord> {
+    const user = this.user(context);
+    const dateKey = shanghaiDateKey();
+    let plan = user.dailyPlans.find((item) => item.dateKey === dateKey);
+    if (!plan) {
+      const review = await this.getReviewOverview(context);
+      const dueIds = review.items
+        .filter(
+          (item) =>
+            item.type === "WORD" &&
+            item.status === "PENDING" &&
+            !!item.vocabularyItemId
+        )
+        .slice(0, 8)
+        .map((item) => item.vocabularyItemId as string);
+      const dueSet = new Set(dueIds);
+      const newIds = user.words
+        .filter((word) => word.attemptCount === 0 && !dueSet.has(word.id))
+        .slice(0, 5)
+        .map((word) => word.id);
+      const practicedIds = user.words
+        .filter((word) => word.attemptCount > 0)
+        .sort(
+          (left, right) => right.incorrectCount - left.incorrectCount
+        )
+        .slice(0, 3)
+        .map((word) => word.id);
+      const outputIds = practicedIds.length ? practicedIds : newIds.slice(0, 3);
+      const tasks: DailyPlanTask[] = [];
+      if (dueIds.length && user.words.length >= 4) {
+        tasks.push({
+          key: "REVIEW",
+          title: "到期复习",
+          description: "在快要忘记前再练一次",
+          mode: "WORD_CHOOSE_MEANING",
+          targetCount: dueIds.length,
+          wordIds: dueIds,
+          completedCount: 0,
+          completed: false
+        });
+      }
+      if (newIds.length) {
+        tasks.push({
+          key: "NEW_WORDS",
+          title: "学习新词",
+          description: "先听发音，再判断认识或不熟",
+          mode: "WORD_READING",
+          targetCount: newIds.length,
+          wordIds: newIds,
+          completedCount: 0,
+          completed: false
+        });
+      }
+      if (outputIds.length) {
+        tasks.push({
+          key: "OUTPUT",
+          title: "输出巩固",
+          description: "用听写把认识变成真正会用",
+          mode: "DICTATION",
+          targetCount: outputIds.length,
+          wordIds: outputIds,
+          completedCount: 0,
+          completed: false
+        });
+      }
+      plan = {
+        id: randomUUID(),
+        dateKey,
+        tasks,
+        completedAt: null
+      };
+      user.dailyPlans.push(plan);
+    }
+
+    const tasks = plan.tasks.map((task) => {
+      const completedCount = Math.min(
+        task.targetCount,
+        user.attempts.filter(
+          (attempt) =>
+            attempt.dailyPlanId === plan?.id &&
+            attempt.dailyTaskKey === task.key &&
+            attempt.result !== "VIEWED"
+        ).length
+      );
+      return {
+        ...task,
+        completedCount,
+        completed: completedCount >= task.targetCount
+      };
+    });
+    const totalCount = tasks.reduce((total, task) => total + task.targetCount, 0);
+    const completedCount = tasks.reduce(
+      (total, task) => total + task.completedCount,
+      0
+    );
+    const completed = tasks.length > 0 && tasks.every((task) => task.completed);
+    if (completed && !plan.completedAt) plan.completedAt = new Date();
+    return {
+      id: plan.id,
+      dateKey,
+      estimatedMinutes: Math.max(2, Math.ceil(totalCount / 3)),
+      completedCount,
+      totalCount,
+      completed,
+      checkedInToday: user.checkIns.includes(dateKey),
+      nextTaskKey: tasks.find((task) => !task.completed)?.key || null,
+      tasks
+    };
+  }
+
+  async getDailyPlanTaskWords(
+    context: IdentityContext,
+    planId: string,
+    taskKey: DailyPlanTaskKey
+  ): Promise<WordRecord[]> {
+    const user = this.user(context);
+    const plan = user.dailyPlans.find((item) => item.id === planId);
+    if (!plan) throw new AppError(404, "DAILY_PLAN_NOT_FOUND", "今日学习计划不存在");
+    const task = plan.tasks.find((item) => item.key === taskKey);
+    if (!task) throw new AppError(404, "DAILY_TASK_NOT_FOUND", "今日学习任务不存在");
+    return task.wordIds
+      .map((id) => user.words.find((word) => word.id === id))
+      .filter((word): word is WordRecord => Boolean(word));
   }
 
   async getLearningReport(context: IdentityContext): Promise<LearningReport> {
@@ -377,11 +537,30 @@ export class MemoryAppRepository implements AppRepository {
     const existing = user.reviewStates.find(
       (state) => state.itemType === itemType && state.itemKey === itemKey
     );
-    const masteredAt = status === "MASTERED" ? new Date() : null;
+    const now = new Date();
+    const masteredAt = status === "MASTERED" ? now : null;
+    const nextReviewAt =
+      status === "MASTERED"
+        ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000)
+        : now;
     if (existing) {
       existing.masteredAt = masteredAt;
+      existing.reviewStage = status === "MASTERED" ? 5 : 0;
+      existing.intervalDays = status === "MASTERED" ? 30 : 0;
+      existing.nextReviewAt = nextReviewAt;
     } else {
-      user.reviewStates.push({ itemType, itemKey, masteredAt });
+      user.reviewStates.push({
+        itemType,
+        itemKey,
+        masteredAt,
+        reviewStage: status === "MASTERED" ? 5 : 0,
+        intervalDays: status === "MASTERED" ? 30 : 0,
+        nextReviewAt,
+        lastReviewedAt: null,
+        lastResult: null,
+        lapseCount: 0,
+        successfulDays: 0
+      });
     }
   }
 
@@ -411,7 +590,18 @@ export class MemoryAppRepository implements AppRepository {
   }
 
   async listWords(context: IdentityContext): Promise<WordRecord[]> {
-    return [...this.user(context).words];
+    const user = this.user(context);
+    return user.words.map((word) => ({
+      ...word,
+      mastery: buildWordMastery(
+        user.attempts
+          .filter(
+            (attempt) =>
+              attempt.vocabularyItemId === word.id && attempt.result === "CORRECT"
+          )
+          .map((attempt) => attempt.mode)
+      )
+    }));
   }
 
   async getWord(context: IdentityContext, wordId: string): Promise<WordRecord | null> {
@@ -486,12 +676,17 @@ export class MemoryAppRepository implements AppRepository {
     context: IdentityContext,
     mode: ChoiceQuestion["mode"],
     limit: number,
-    scope: "all" | "weak" = "all"
+    scope: "all" | "weak" = "all",
+    targetWordIds?: string[]
   ): Promise<ChoiceQuestion[]> {
     const words = this.user(context).words;
     if (words.length < 4) throw new AppError(409, "NOT_ENOUGH_WORDS", "至少需要 4 个词汇");
     let targets = words;
-    if (scope === "weak") {
+    if (targetWordIds?.length) {
+      targets = targetWordIds
+        .map((id) => words.find((word) => word.id === id))
+        .filter((word): word is WordRecord => Boolean(word));
+    } else if (scope === "weak") {
       const review = await this.getReviewOverview(context);
       const pending = new Set(
         review.items
@@ -537,7 +732,9 @@ export class MemoryAppRepository implements AppRepository {
       answerText: input.answerText || input.selectedWordId,
       exerciseKey: `word:${word.id}`,
       promptText: word.english,
-      referenceAnswer: word.chinese
+      referenceAnswer: word.chinese,
+      dailyPlanId: input.dailyPlanId,
+      dailyTaskKey: input.dailyTaskKey
     });
     return {
       correct,
@@ -607,14 +804,68 @@ export class MemoryAppRepository implements AppRepository {
 
   async recordAttempt(context: IdentityContext, input: AttemptInput): Promise<void> {
     const user = this.user(context);
-    user.attempts.push({ ...input, occurredAt: new Date() });
+    if (input.dailyPlanId || input.dailyTaskKey) {
+      if (!input.dailyPlanId || !input.dailyTaskKey) {
+        throw new AppError(400, "INVALID_DAILY_TASK", "今日学习任务参数不完整");
+      }
+      const plan = user.dailyPlans.find((item) => item.id === input.dailyPlanId);
+      if (!plan) {
+        throw new AppError(404, "DAILY_PLAN_NOT_FOUND", "今日学习计划不存在");
+      }
+      const task = plan.tasks.find((item) => item.key === input.dailyTaskKey);
+      if (!task) {
+        throw new AppError(404, "DAILY_TASK_NOT_FOUND", "今日学习任务不存在");
+      }
+      if (
+        task.mode !== input.mode ||
+        !input.vocabularyItemId ||
+        !task.wordIds.includes(input.vocabularyItemId)
+      ) {
+        throw new AppError(400, "INVALID_DAILY_TASK_ATTEMPT", "本次练习不属于该学习任务");
+      }
+    }
+    const occurredAt = new Date();
+    user.attempts.push({ ...input, occurredAt });
+    const dateKey = shanghaiDateKey(occurredAt);
+    const todayAttempts = user.attempts.filter(
+      (attempt) =>
+        attempt.result !== "VIEWED" &&
+        shanghaiDateKey(attempt.occurredAt) === dateKey
+    );
+    const hasOutputPractice = todayAttempts.some((attempt) =>
+      ["SENTENCE", "DIALOGUE_TEXT", "DIALOGUE_VOICE"].includes(attempt.mode)
+    );
+    if (
+      (todayAttempts.length >= 3 || hasOutputPractice) &&
+      !user.checkIns.includes(dateKey)
+    ) {
+      user.checkIns.push(dateKey);
+    }
     if (!input.vocabularyItemId) return;
     const word = user.words.find((item) => item.id === input.vocabularyItemId);
     if (!word) return;
     word.attemptCount += 1;
     if (input.result === "CORRECT") word.correctCount += 1;
     if (input.result === "INCORRECT") word.incorrectCount += 1;
-    word.lastPracticedAt = new Date();
+    word.lastPracticedAt = occurredAt;
+    const itemKey = `word:${word.id}`;
+    const existingState = user.reviewStates.find(
+      (state) => state.itemType === "WORD" && state.itemKey === itemKey
+    );
+    const nextState = updateReviewSchedule(
+      existingState || initialReviewSchedule(),
+      input.result,
+      word.lastPracticedAt
+    );
+    if (existingState) {
+      Object.assign(existingState, nextState);
+    } else {
+      user.reviewStates.push({
+        itemType: "WORD",
+        itemKey,
+        ...nextState
+      });
+    }
   }
 
   private user(context: IdentityContext): MemoryUser {

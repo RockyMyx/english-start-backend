@@ -4,6 +4,7 @@ export const DAILY_SCORE_GOAL = 50;
 
 const correctAnswerPoints: Record<PracticeMode, number> = {
   WORD_READING: 0,
+  WORD_PRONUNCIATION: 0,
   LISTEN_CHOOSE_MEANING: 1,
   MEANING_CHOOSE_WORD: 1,
   WORD_CHOOSE_MEANING: 1,

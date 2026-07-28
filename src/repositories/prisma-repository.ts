@@ -1,9 +1,12 @@
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../generated/prisma/client.js";
+import { PrismaClient, type Prisma } from "../generated/prisma/client.js";
 import type {
   AttemptInput,
   CheckInSummary,
   ChoiceQuestion,
+  DailyPlanRecord,
+  DailyPlanTask,
+  DailyPlanTaskKey,
   DashboardRecord,
   DialoguePromptRecord,
   IdentityContext,
@@ -25,6 +28,11 @@ import { currentStreakDays, shanghaiDateKey, shiftDateKey } from "../domain/date
 import { buildReviewOverview } from "../domain/review.js";
 import { DAILY_SCORE_GOAL, scoreForAttempt } from "../domain/scoring.js";
 import { sentenceCanUseVocabulary } from "../domain/sentence-coverage.js";
+import {
+  initialReviewSchedule,
+  updateReviewSchedule
+} from "../domain/spaced-repetition.js";
+import { buildWordMastery } from "../domain/word-mastery.js";
 import { AppError } from "../lib/errors.js";
 import type { AppRepository } from "./app-repository.js";
 
@@ -43,6 +51,17 @@ function shuffled<T>(items: T[]): T[] {
     [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
   }
   return result;
+}
+
+function dailyPlanTasks(value: unknown): DailyPlanTask[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is DailyPlanTask =>
+      !!item &&
+      typeof item === "object" &&
+      typeof (item as DailyPlanTask).key === "string" &&
+      Array.isArray((item as DailyPlanTask).wordIds)
+  );
 }
 
 export class PrismaAppRepository implements AppRepository {
@@ -198,6 +217,25 @@ export class PrismaAppRepository implements AppRepository {
       where: { userId_dateKey: { userId: context.userId, dateKey } },
       select: { id: true }
     });
+    if (!existing) {
+      const recentAttempts = await this.client.practiceAttempt.findMany({
+        where: {
+          userId: context.userId,
+          result: { not: "VIEWED" },
+          occurredAt: { gte: new Date(Date.now() - 36 * 60 * 60 * 1000) }
+        },
+        select: { mode: true, occurredAt: true }
+      });
+      const todayAttempts = recentAttempts.filter(
+        (attempt) => shanghaiDateKey(attempt.occurredAt) === dateKey
+      );
+      const hasOutputPractice = todayAttempts.some((attempt) =>
+        ["SENTENCE", "DIALOGUE_TEXT", "DIALOGUE_VOICE"].includes(attempt.mode)
+      );
+      if (todayAttempts.length < 3 && !hasOutputPractice) {
+        throw new AppError(409, "LEARNING_REQUIRED", "完成一组有效练习后即可签到");
+      }
+    }
     await this.client.dailyCheckIn.upsert({
       where: { userId_dateKey: { userId: context.userId, dateKey } },
       update: {},
@@ -220,6 +258,153 @@ export class PrismaAppRepository implements AppRepository {
       todayScore: dashboard.todayScore,
       wordCount: dashboard.wordCount
     };
+  }
+
+  async getTodayDailyPlan(context: IdentityContext): Promise<DailyPlanRecord> {
+    const dateKey = shanghaiDateKey();
+    let plan = await this.client.dailyPlan.findUnique({
+      where: { userId_dateKey: { userId: context.userId, dateKey } }
+    });
+    if (!plan) {
+      const [words, review] = await Promise.all([
+        this.client.vocabularyItem.findMany({
+          where: { userId: context.userId, archivedAt: null },
+          include: { progress: true },
+          orderBy: [{ createdAt: "asc" }, { normalizedEnglish: "asc" }]
+        }),
+        this.getReviewOverview(context)
+      ]);
+      const dueIds = review.items
+        .filter(
+          (item) =>
+            item.type === "WORD" &&
+            item.status === "PENDING" &&
+            !!item.vocabularyItemId
+        )
+        .slice(0, 8)
+        .map((item) => item.vocabularyItemId as string);
+      const dueSet = new Set(dueIds);
+      const newIds = words
+        .filter((word) => !word.progress || word.progress.attemptCount === 0)
+        .filter((word) => !dueSet.has(word.id))
+        .slice(0, 5)
+        .map((word) => word.id);
+      const practicedIds = words
+        .filter((word) => (word.progress?.attemptCount || 0) > 0)
+        .sort(
+          (left, right) =>
+            (right.progress?.incorrectCount || 0) -
+            (left.progress?.incorrectCount || 0)
+        )
+        .slice(0, 3)
+        .map((word) => word.id);
+      const outputIds = practicedIds.length ? practicedIds : newIds.slice(0, 3);
+      const tasks: DailyPlanTask[] = [];
+      if (dueIds.length && words.length >= 4) {
+        tasks.push({
+          key: "REVIEW",
+          title: "到期复习",
+          description: "在快要忘记前再练一次",
+          mode: "WORD_CHOOSE_MEANING",
+          targetCount: dueIds.length,
+          wordIds: dueIds,
+          completedCount: 0,
+          completed: false
+        });
+      }
+      if (newIds.length) {
+        tasks.push({
+          key: "NEW_WORDS",
+          title: "学习新词",
+          description: "先听发音，再判断认识或不熟",
+          mode: "WORD_READING",
+          targetCount: newIds.length,
+          wordIds: newIds,
+          completedCount: 0,
+          completed: false
+        });
+      }
+      if (outputIds.length) {
+        tasks.push({
+          key: "OUTPUT",
+          title: "输出巩固",
+          description: "用听写把认识变成真正会用",
+          mode: "DICTATION",
+          targetCount: outputIds.length,
+          wordIds: outputIds,
+          completedCount: 0,
+          completed: false
+        });
+      }
+      plan = await this.client.dailyPlan.create({
+        data: {
+          userId: context.userId,
+          dateKey,
+          tasks: tasks as unknown as Prisma.InputJsonValue
+        }
+      });
+    }
+
+    const storedTasks = dailyPlanTasks(plan.tasks);
+    const [attempts, checkedIn] = await Promise.all([
+      this.client.practiceAttempt.findMany({
+        where: { dailyPlanId: plan.id, result: { not: "VIEWED" } },
+        select: { dailyTaskKey: true }
+      }),
+      this.client.dailyCheckIn.findUnique({
+        where: { userId_dateKey: { userId: context.userId, dateKey } },
+        select: { id: true }
+      })
+    ]);
+    const tasks = storedTasks.map((task) => {
+      const completedCount = Math.min(
+        task.targetCount,
+        attempts.filter((attempt) => attempt.dailyTaskKey === task.key).length
+      );
+      return {
+        ...task,
+        completedCount,
+        completed: completedCount >= task.targetCount
+      };
+    });
+    const totalCount = tasks.reduce((total, task) => total + task.targetCount, 0);
+    const completedCount = tasks.reduce(
+      (total, task) => total + task.completedCount,
+      0
+    );
+    const completed = tasks.length > 0 && tasks.every((task) => task.completed);
+    if (completed && !plan.completedAt) {
+      await this.client.dailyPlan.update({
+        where: { id: plan.id },
+        data: { completedAt: new Date() }
+      });
+    }
+    return {
+      id: plan.id,
+      dateKey,
+      estimatedMinutes: Math.max(2, Math.ceil(totalCount / 3)),
+      completedCount,
+      totalCount,
+      completed,
+      checkedInToday: Boolean(checkedIn),
+      nextTaskKey: tasks.find((task) => !task.completed)?.key || null,
+      tasks
+    };
+  }
+
+  async getDailyPlanTaskWords(
+    context: IdentityContext,
+    planId: string,
+    taskKey: DailyPlanTaskKey
+  ): Promise<WordRecord[]> {
+    const plan = await this.client.dailyPlan.findFirst({
+      where: { id: planId, userId: context.userId }
+    });
+    if (!plan) throw new AppError(404, "DAILY_PLAN_NOT_FOUND", "今日学习计划不存在");
+    const task = dailyPlanTasks(plan.tasks).find((item) => item.key === taskKey);
+    if (!task) throw new AppError(404, "DAILY_TASK_NOT_FOUND", "今日学习任务不存在");
+    const words = await Promise.all(task.wordIds.map((id) => this.getWord(context, id)));
+    return words.filter((word): word is WordRecord => Boolean(word));
   }
 
   async getLearningReport(context: IdentityContext): Promise<LearningReport> {
@@ -339,7 +524,13 @@ export class PrismaAppRepository implements AppRepository {
       }),
       this.client.reviewItemState.findMany({
         where: { userId: context.userId },
-        select: { itemType: true, itemKey: true, masteredAt: true }
+        select: {
+          itemType: true,
+          itemKey: true,
+          masteredAt: true,
+          reviewStage: true,
+          nextReviewAt: true
+        }
       })
     ]);
     return buildReviewOverview(attempts, states);
@@ -351,13 +542,31 @@ export class PrismaAppRepository implements AppRepository {
     itemKey: string,
     status: ReviewItemStatus
   ): Promise<void> {
-    const masteredAt = status === "MASTERED" ? new Date() : null;
+    const now = new Date();
+    const masteredAt = status === "MASTERED" ? now : null;
+    const nextReviewAt =
+      status === "MASTERED"
+        ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000)
+        : now;
     await this.client.reviewItemState.upsert({
       where: {
         userId_itemType_itemKey: { userId: context.userId, itemType, itemKey }
       },
-      update: { masteredAt },
-      create: { userId: context.userId, itemType, itemKey, masteredAt }
+      update: {
+        masteredAt,
+        reviewStage: status === "MASTERED" ? 5 : 0,
+        intervalDays: status === "MASTERED" ? 30 : 0,
+        nextReviewAt
+      },
+      create: {
+        userId: context.userId,
+        itemType,
+        itemKey,
+        masteredAt,
+        reviewStage: status === "MASTERED" ? 5 : 0,
+        intervalDays: status === "MASTERED" ? 30 : 0,
+        nextReviewAt
+      }
     });
   }
 
@@ -421,7 +630,13 @@ export class PrismaAppRepository implements AppRepository {
   async listWords(context: IdentityContext): Promise<WordRecord[]> {
     const words = await this.client.vocabularyItem.findMany({
       where: { userId: context.userId, archivedAt: null },
-      include: { progress: true },
+      include: {
+        progress: true,
+        practiceAttempts: {
+          where: { result: "CORRECT" },
+          select: { mode: true }
+        }
+      },
       orderBy: [{ source: "asc" }, { normalizedEnglish: "asc" }]
     });
     return words.map((word) => ({
@@ -433,7 +648,8 @@ export class PrismaAppRepository implements AppRepository {
       attemptCount: word.progress?.attemptCount || 0,
       correctCount: word.progress?.correctCount || 0,
       incorrectCount: word.progress?.incorrectCount || 0,
-      lastPracticedAt: word.progress?.lastPracticedAt || null
+      lastPracticedAt: word.progress?.lastPracticedAt || null,
+      mastery: buildWordMastery(word.practiceAttempts.map((attempt) => attempt.mode))
     }));
   }
 
@@ -603,7 +819,8 @@ export class PrismaAppRepository implements AppRepository {
     context: IdentityContext,
     mode: ChoiceQuestion["mode"],
     limit: number,
-    scope: "all" | "weak" = "all"
+    scope: "all" | "weak" = "all",
+    targetWordIds?: string[]
   ): Promise<ChoiceQuestion[]> {
     const words = await this.client.vocabularyItem.findMany({
       where: { userId: context.userId, archivedAt: null }
@@ -612,7 +829,12 @@ export class PrismaAppRepository implements AppRepository {
       throw new AppError(409, "NOT_ENOUGH_WORDS", "至少需要 4 个词汇才能开始选择题");
     }
     let targets = words;
-    if (scope === "weak") {
+    if (targetWordIds?.length) {
+      const targetSet = new Set(targetWordIds);
+      targets = targetWordIds
+        .map((id) => words.find((word) => word.id === id))
+        .filter((word): word is (typeof words)[number] => Boolean(word && targetSet.has(word.id)));
+    } else if (scope === "weak") {
       const review = await this.getReviewOverview(context);
       const weakOrder = new Map(
         review.items
@@ -683,6 +905,9 @@ export class PrismaAppRepository implements AppRepository {
       exerciseKey: `word:${word.id}`,
       promptText: word.english,
       referenceAnswer: word.chinese
+      ,
+      dailyPlanId: input.dailyPlanId,
+      dailyTaskKey: input.dailyTaskKey
     });
     return {
       correct,
@@ -815,6 +1040,31 @@ export class PrismaAppRepository implements AppRepository {
   async recordAttempt(context: IdentityContext, input: AttemptInput): Promise<void> {
     const now = new Date();
     await this.client.$transaction(async (tx) => {
+      if (input.dailyPlanId || input.dailyTaskKey) {
+        if (!input.dailyPlanId || !input.dailyTaskKey) {
+          throw new AppError(400, "INVALID_DAILY_TASK", "今日学习任务参数不完整");
+        }
+        const plan = await tx.dailyPlan.findFirst({
+          where: { id: input.dailyPlanId, userId: context.userId },
+          select: { tasks: true }
+        });
+        if (!plan) {
+          throw new AppError(404, "DAILY_PLAN_NOT_FOUND", "今日学习计划不存在");
+        }
+        const task = dailyPlanTasks(plan.tasks).find(
+          (item) => item.key === input.dailyTaskKey
+        );
+        if (!task) {
+          throw new AppError(404, "DAILY_TASK_NOT_FOUND", "今日学习任务不存在");
+        }
+        if (
+          task.mode !== input.mode ||
+          !input.vocabularyItemId ||
+          !task.wordIds.includes(input.vocabularyItemId)
+        ) {
+          throw new AppError(400, "INVALID_DAILY_TASK_ATTEMPT", "本次练习不属于该学习任务");
+        }
+      }
       await tx.practiceAttempt.create({
         data: {
           userId: context.userId,
@@ -831,9 +1081,32 @@ export class PrismaAppRepository implements AppRepository {
           completenessScore: input.completenessScore,
           exerciseKey: input.exerciseKey,
           promptText: input.promptText,
-          referenceAnswer: input.referenceAnswer
+          referenceAnswer: input.referenceAnswer,
+          dailyPlanId: input.dailyPlanId,
+          dailyTaskKey: input.dailyTaskKey
         }
       });
+      const dateKey = shanghaiDateKey(now);
+      const existingCheckIn = await tx.dailyCheckIn.findUnique({
+        where: { userId_dateKey: { userId: context.userId, dateKey } },
+        select: { id: true }
+      });
+      if (!existingCheckIn) {
+        const todayAttempts = (
+          await tx.practiceAttempt.findMany({
+            where: { userId: context.userId, result: { not: "VIEWED" } },
+            select: { occurredAt: true, mode: true }
+          })
+        ).filter((attempt) => shanghaiDateKey(attempt.occurredAt) === dateKey);
+        const hasOutputPractice = todayAttempts.some((attempt) =>
+          ["SENTENCE", "DIALOGUE_TEXT", "DIALOGUE_VOICE"].includes(attempt.mode)
+        );
+        if (todayAttempts.length >= 3 || hasOutputPractice) {
+          await tx.dailyCheckIn.create({
+            data: { userId: context.userId, dateKey }
+          });
+        }
+      }
       if (!input.vocabularyItemId) return;
       const isCorrect = input.result === "CORRECT";
       const isIncorrect = input.result === "INCORRECT";
@@ -857,6 +1130,38 @@ export class PrismaAppRepository implements AppRepository {
           correctCount: isCorrect ? 1 : 0,
           incorrectCount: isIncorrect ? 1 : 0,
           lastPracticedAt: now
+        }
+      });
+      const itemType: ReviewItemType = "WORD";
+      const itemKey = `word:${input.vocabularyItemId}`;
+      const existingState = await tx.reviewItemState.findUnique({
+        where: {
+          userId_itemType_itemKey: {
+            userId: context.userId,
+            itemType,
+            itemKey
+          }
+        }
+      });
+      const nextState = updateReviewSchedule(
+        existingState || initialReviewSchedule(),
+        input.result,
+        now
+      );
+      await tx.reviewItemState.upsert({
+        where: {
+          userId_itemType_itemKey: {
+            userId: context.userId,
+            itemType,
+            itemKey
+          }
+        },
+        update: nextState,
+        create: {
+          userId: context.userId,
+          itemType,
+          itemKey,
+          ...nextState
         }
       });
     });

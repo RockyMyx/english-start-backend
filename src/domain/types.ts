@@ -1,5 +1,6 @@
 export type PracticeMode =
   | "WORD_READING"
+  | "WORD_PRONUNCIATION"
   | "LISTEN_CHOOSE_MEANING"
   | "MEANING_CHOOSE_WORD"
   | "WORD_CHOOSE_MEANING"
@@ -67,10 +68,14 @@ export interface ReviewItem {
   wrongCount: number;
   correctStreak: number;
   lastWrongAt: Date;
+  nextReviewAt: Date | null;
+  reviewStage: number;
   modes: PracticeMode[];
 }
 
 export interface ReviewOverview {
+  dueCount: number;
+  upcomingCount: number;
   pendingCount: number;
   masteredCount: number;
   categories: Array<{
@@ -91,6 +96,24 @@ export interface WordRecord {
   correctCount: number;
   incorrectCount: number;
   lastPracticedAt: Date | null;
+  mastery?: WordMastery;
+}
+
+export type WordMasteryStepKey =
+  | "RECOGNITION"
+  | "LISTENING"
+  | "SPELLING"
+  | "SPEAKING"
+  | "USAGE";
+
+export interface WordMastery {
+  completedCount: number;
+  levelName: string;
+  steps: Array<{
+    key: WordMasteryStepKey;
+    label: string;
+    completed: boolean;
+  }>;
 }
 
 export interface WordInput {
@@ -126,6 +149,8 @@ export interface PracticeAnswerInput {
   wordId: string;
   selectedWordId?: string;
   answerText?: string;
+  dailyPlanId?: string;
+  dailyTaskKey?: DailyPlanTaskKey;
 }
 
 export interface PracticeAnswerResult {
@@ -177,6 +202,31 @@ export interface CheckInSummary {
   currentStreak: number;
   todayScore: number;
   wordCount: number;
+}
+
+export type DailyPlanTaskKey = "REVIEW" | "NEW_WORDS" | "OUTPUT";
+
+export interface DailyPlanTask {
+  key: DailyPlanTaskKey;
+  title: string;
+  description: string;
+  mode: PracticeMode;
+  targetCount: number;
+  wordIds: string[];
+  completedCount: number;
+  completed: boolean;
+}
+
+export interface DailyPlanRecord {
+  id: string;
+  dateKey: string;
+  estimatedMinutes: number;
+  completedCount: number;
+  totalCount: number;
+  completed: boolean;
+  checkedInToday: boolean;
+  nextTaskKey: DailyPlanTaskKey | null;
+  tasks: DailyPlanTask[];
 }
 
 export interface WeakWordRecord {
@@ -236,4 +286,6 @@ export interface AttemptInput {
   exerciseKey?: string;
   promptText?: string;
   referenceAnswer?: string;
+  dailyPlanId?: string;
+  dailyTaskKey?: DailyPlanTaskKey;
 }

@@ -7,6 +7,7 @@ import multipart from "@fastify/multipart";
 import type { AppConfig } from "./config.js";
 import type {
   ChoiceQuestion,
+  DailyPlanTaskKey,
   PracticeAnswerInput,
   ReviewItemStatus,
   ReviewItemType
@@ -223,6 +224,29 @@ export async function buildApp(options: BuildAppOptions) {
     return reply.status(result.firstCheckInToday ? 201 : 200).send(result);
   });
 
+  app.get("/daily-plans/today", async (request) => {
+    const current = await auth.authenticate(request.headers.authorization);
+    return repository.getTodayDailyPlan(current.context);
+  });
+
+  app.get<{ Params: { id: string; taskKey: string } }>(
+    "/daily-plans/:id/tasks/:taskKey/words",
+    async (request) => {
+      const current = await auth.authenticate(request.headers.authorization);
+      const taskKey = request.params.taskKey as DailyPlanTaskKey;
+      if (!["REVIEW", "NEW_WORDS", "OUTPUT"].includes(taskKey)) {
+        throw new AppError(400, "INVALID_DAILY_TASK", "今日学习任务不正确");
+      }
+      return {
+        words: await repository.getDailyPlanTaskWords(
+          current.context,
+          request.params.id,
+          taskKey
+        )
+      };
+    }
+  );
+
   app.get("/reports/learning", async (request) => {
     const current = await auth.authenticate(request.headers.authorization);
     return repository.getLearningReport(current.context);
@@ -338,7 +362,10 @@ export async function buildApp(options: BuildAppOptions) {
           ? "已经认识"
           : result === "INCORRECT"
             ? "需要继续学习"
-            : "已浏览"
+            : "已浏览",
+      dailyPlanId: optionalText(body, "dailyPlanId", 128) || undefined,
+      dailyTaskKey:
+        (optionalText(body, "dailyTaskKey", 40) as DailyPlanTaskKey) || undefined
     });
     return reply.status(201).send({ recorded: true });
   });
@@ -361,7 +388,7 @@ export async function buildApp(options: BuildAppOptions) {
     const correct = recognizedCorrect && voice.pronunciationScore >= 60;
     await repository.recordAttempt(current.context, {
       vocabularyItemId: word.id,
-      mode: "WORD_READING",
+      mode: "WORD_PRONUNCIATION",
       result: correct ? "CORRECT" : "INCORRECT",
       exerciseKey: `word:${word.id}`,
       promptText: word.english,
@@ -415,18 +442,34 @@ export async function buildApp(options: BuildAppOptions) {
 
   app.get("/practice/questions", async (request) => {
     const current = await auth.authenticate(request.headers.authorization);
-    const query = request.query as { mode?: string; limit?: string; scope?: string };
+    const query = request.query as {
+      mode?: string;
+      limit?: string;
+      scope?: string;
+      dailyPlanId?: string;
+      dailyTaskKey?: string;
+    };
     if (!query.mode || !choiceModes.has(query.mode as ChoiceQuestion["mode"])) {
       throw new AppError(400, "INVALID_MODE", "练习模式不正确");
     }
     const scope = query.scope === "weak" ? "weak" : "all";
     const limit = Math.min(20, Math.max(1, Number(query.limit) || 10));
+    const dailyTaskKey = query.dailyTaskKey as DailyPlanTaskKey | undefined;
+    const planWords =
+      query.dailyPlanId && dailyTaskKey
+        ? await repository.getDailyPlanTaskWords(
+            current.context,
+            query.dailyPlanId,
+            dailyTaskKey
+          )
+        : [];
     return {
       questions: await repository.getChoiceQuestions(
         current.context,
         query.mode as ChoiceQuestion["mode"],
         limit,
-        scope
+        scope,
+        planWords.length ? planWords.map((word) => word.id) : undefined
       )
     };
   });
@@ -442,7 +485,10 @@ export async function buildApp(options: BuildAppOptions) {
       mode,
       wordId: requiredText(body, "wordId", 128),
       selectedWordId: optionalText(body, "selectedWordId", 128) || undefined,
-      answerText: optionalText(body, "answerText", 120) || undefined
+      answerText: optionalText(body, "answerText", 120) || undefined,
+      dailyPlanId: optionalText(body, "dailyPlanId", 128) || undefined,
+      dailyTaskKey:
+        (optionalText(body, "dailyTaskKey", 40) as DailyPlanTaskKey) || undefined
     });
     return reply.status(201).send(result);
   });
@@ -478,7 +524,11 @@ export async function buildApp(options: BuildAppOptions) {
       },
       config
     );
+    const targetWord = (await repository.listWords(current.context)).find(
+      (word) => normalizeEnglish(word.english) === normalizeEnglish(prompt.targetWord)
+    );
     await repository.recordAttempt(current.context, {
+      vocabularyItemId: targetWord?.id,
       mode: "SENTENCE",
       result: evaluation.correct ? "CORRECT" : "INCORRECT",
       exerciseKey: `sentence:${prompt.id}`,
@@ -511,7 +561,11 @@ export async function buildApp(options: BuildAppOptions) {
       config
     );
     const correct = semantic.correct && voice.pronunciationScore >= 60;
+    const targetWord = (await repository.listWords(current.context)).find(
+      (word) => normalizeEnglish(word.english) === normalizeEnglish(prompt.targetWord)
+    );
     await repository.recordAttempt(current.context, {
+      vocabularyItemId: targetWord?.id,
       mode: "SENTENCE",
       result: correct ? "CORRECT" : "INCORRECT",
       exerciseKey: `sentence:${prompt.id}`,

@@ -355,17 +355,48 @@ describe("English Start API", () => {
     const headers = { authorization: `Bearer ${token}` };
     await app.inject({ method: "POST", url: "/starter-pack/import", headers });
     const words = await app.inject({ method: "GET", url: "/words", headers });
-    const word = words.json<{ words: Array<{ id: string; english: string }> }>().words[0];
+    const wordRows = words.json<{ words: Array<{ id: string; english: string }> }>().words;
+    const word = wordRows[0];
+
+    const tooEarlyCheckIn = await app.inject({
+      method: "POST",
+      url: "/check-ins/today",
+      headers
+    });
+    expect(tooEarlyCheckIn.statusCode).toBe(409);
+    expect(tooEarlyCheckIn.json()).toMatchObject({ error: "LEARNING_REQUIRED" });
+
+    for (const [index, currentWord] of wordRows.slice(0, 3).entries()) {
+      const reading = await app.inject({
+        method: "POST",
+        url: `/words/${currentWord.id}/reading`,
+        headers,
+        payload: { result: index === 0 ? "INCORRECT" : "CORRECT" }
+      });
+      expect(reading.statusCode).toBe(201);
+    }
+
+    const dashboardAfterPractice = await app.inject({
+      method: "GET",
+      url: "/me",
+      headers
+    });
+    expect(dashboardAfterPractice.statusCode).toBe(200);
+    expect(dashboardAfterPractice.json()).toMatchObject({
+      checkedInToday: true,
+      checkInDays: 1,
+      currentStreak: 1
+    });
 
     const firstCheckIn = await app.inject({
       method: "POST",
       url: "/check-ins/today",
       headers
     });
-    expect(firstCheckIn.statusCode).toBe(201);
+    expect(firstCheckIn.statusCode).toBe(200);
     expect(firstCheckIn.json()).toMatchObject({
       checkedInToday: true,
-      firstCheckInToday: true,
+      firstCheckInToday: false,
       totalDays: 1,
       currentStreak: 1
     });
@@ -381,22 +412,14 @@ describe("English Start API", () => {
       totalDays: 1
     });
 
-    const reading = await app.inject({
-      method: "POST",
-      url: `/words/${word.id}/reading`,
-      headers,
-      payload: { result: "INCORRECT" }
-    });
-    expect(reading.statusCode).toBe(201);
-
     const report = await app.inject({ method: "GET", url: "/reports/learning", headers });
     expect(report.statusCode).toBe(200);
     expect(report.json()).toMatchObject({
       wordCount: 50,
       totalCheckInDays: 1,
       currentStreak: 1,
-      totalAttempts: 1,
-      correctAttempts: 0,
+      totalAttempts: 3,
+      correctAttempts: 2,
       weakWords: [
         {
           id: word.id,
@@ -415,7 +438,7 @@ describe("English Start API", () => {
     expect(weakQuestions.statusCode).toBe(200);
     expect(
       weakQuestions.json<{ questions: Array<{ wordId: string }> }>().questions
-    ).toEqual([expect.objectContaining({ wordId: word.id })]);
+    ).toEqual([]);
   });
 
   it("uses the vocabulary word as the pronunciation reference", async () => {
@@ -512,12 +535,8 @@ describe("English Start API", () => {
       pendingCount: number;
       items: Array<{ type: string; key: string; status: string }>;
     }>();
-    expect(pending.pendingCount).toBe(1);
-    expect(pending.items[0]).toMatchObject({
-      type: "WORD",
-      key: `word:${question.wordId}`,
-      status: "PENDING"
-    });
+    expect(pending.pendingCount).toBe(0);
+    expect(review.json()).toMatchObject({ upcomingCount: 1 });
 
     await app.inject({
       method: "PUT",
@@ -532,6 +551,58 @@ describe("English Start API", () => {
     const mastered = await app.inject({ method: "GET", url: "/review", headers });
     expect(mastered.json()).toMatchObject({ pendingCount: 0, masteredCount: 1 });
   });
+
+  it("keeps the same daily plan and exposes its selected words", async () => {
+    const app = await buildApp({ repository: new MemoryAppRepository(), config });
+    apps.push(app);
+    const token = await login(app);
+    const headers = { authorization: `Bearer ${token}` };
+    await app.inject({ method: "POST", url: "/starter-pack/import", headers });
+
+    const first = await app.inject({ method: "GET", url: "/daily-plans/today", headers });
+    const second = await app.inject({ method: "GET", url: "/daily-plans/today", headers });
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+      const plan = first.json<{
+        id: string;
+        totalCount: number;
+        nextTaskKey: string;
+        tasks: Array<{ key: string; mode: string; targetCount: number }>;
+      }>();
+    expect(second.json()).toMatchObject({ id: plan.id, tasks: plan.tasks });
+    expect(plan.totalCount).toBeGreaterThan(0);
+
+    const words = await app.inject({
+      method: "GET",
+      url: `/daily-plans/${plan.id}/tasks/${plan.nextTaskKey}/words`,
+      headers
+    });
+      expect(words.statusCode).toBe(200);
+      expect(words.json<{ words: unknown[] }>().words.length).toBeGreaterThan(0);
+
+      const allWords = (
+        await app.inject({ method: "GET", url: "/words", headers })
+      ).json<{ words: Array<{ id: string }> }>().words;
+      const selectedIds = new Set(
+        words.json<{ words: Array<{ id: string }> }>().words.map((word) => word.id)
+      );
+      const unrelatedWord = allWords.find((word) => !selectedIds.has(word.id));
+      expect(unrelatedWord).toBeDefined();
+      const rejectedAttempt = await app.inject({
+        method: "POST",
+        url: `/words/${unrelatedWord!.id}/reading`,
+        headers,
+        payload: {
+          result: "CORRECT",
+          dailyPlanId: plan.id,
+          dailyTaskKey: plan.nextTaskKey
+        }
+      });
+      expect(rejectedAttempt.statusCode).toBe(400);
+      expect(rejectedAttempt.json()).toMatchObject({
+        error: "INVALID_DAILY_TASK_ATTEMPT"
+      });
+    });
 
   it("accepts a WeChat avatar uploaded with a generic content type", async () => {
     const app = await buildApp({ repository: new MemoryAppRepository(), config });
