@@ -1,7 +1,7 @@
 # English Start Backend
 
-“单词练练”微信小程序的统一后端，负责身份与会话、个人词库、启蒙内容、练习出题与
-计分、学习记录、AI 语义判断、语音合成、语音转写和发音评测。
+“单词练练”微信小程序的统一后端，负责身份与会话、兑换码会员、个人词库、启蒙
+内容、练习出题与计分、学习记录、AI 语义判断、语音合成、语音转写和发音评测。
 
 ## 技术栈
 
@@ -58,6 +58,41 @@ GET http://localhost:3000/health
 
 开发模式可以调用 `/auth/dev-login`。当 `NODE_ENV=production` 时，该接口始终不可用，
 不受 `DEV_LOGIN_ENABLED` 的值影响。正式登录需要同时配置微信 AppID 和 AppSecret。
+
+### 兑换码会员
+
+启蒙 70 词对免费用户开放；新增单个单词、图片识别和
+批量加入单词需要有效会员。会员过期不会删除已经加入的个人词汇。
+
+开发兑换码使用本地命令生成，数据库只保存兑换码哈希：
+
+```powershell
+npm run membership:codes -- --count 10 --days 7 --label development
+```
+
+一次生成多个时长并写入 CSV：
+
+```powershell
+npm run membership:codes -- --batch 7:200 --batch 365:200 --output membership-codes.csv
+```
+
+没有数据库连接时可以增加 `--offline` 只生成文件。将文件上传到实际后端服务器后导入：
+
+```powershell
+npm run membership:codes:import -- --input membership-codes.csv
+```
+
+也可以使用 `--migration-output` 生成只包含哈希的数据库迁移，随部署自动导入初始批次。
+
+可以增加 `--expires-in-days 30` 设置兑换码本身的有效期。未提供时兑换码长期有效，
+但每个兑换码只能成功使用一次。
+
+会员可以重复完成能力测评。学习资料只收集年龄段、年级、英语接触时间和可多选的
+学习目标；每次结果独立保存，测评答案不计入日常练习、积分和签到。免费用户仍可查看基础学习
+报告，四维能力变化、具体证据和下一步建议仅向有效会员返回。
+
+能力测评按英语接触时间选择并固定题组：未接触或半年以内使用基础题组，半年至一年使用
+标准题组，一年以上使用进阶题组。题组难度保存在测评记录中，中途修改资料不会改变续测题目。
 
 ### AI 语义判断
 
@@ -117,6 +152,15 @@ Authorization: Bearer <token>
 | `POST` | `/auth/dev-login` | 开发模拟登录 |
 | `POST` | `/auth/wechat` | 使用微信 code 登录 |
 | `GET` | `/me` | 首页统计、词库数量和模块开放状态 |
+| `GET` | `/membership` | 查询会员状态和到期时间 |
+| `POST` | `/membership/redeem` | 使用一次性兑换码开通会员 |
+| `GET` | `/onboarding` | 查询学习资料、当前测评和历史结果 |
+| `PUT` | `/onboarding/profile` | 保存学习资料和多选学习目标（会员） |
+| `POST` | `/assessments/initial/start` | 开始新一轮或继续进行中的能力测评（会员） |
+| `POST` | `/assessments/initial/:id/answers` | 提交选择、拼写或跳过的发音题（会员） |
+| `POST` | `/assessments/initial/:id/questions/:questionKey/voice` | 提交测评录音（会员） |
+| `POST` | `/assessments/initial/:id/complete` | 完成测评并计算四维结果（会员） |
+| `GET` | `/reports/learning` | 基础学习报告；有效会员额外返回个性化报告 |
 | `PUT` | `/me/daily-goal` | 修改每日达标分数 |
 | `GET` | `/starter-pack` | 查看启蒙词包 |
 | `POST` | `/starter-pack/import` | 将启蒙词导入个人词库 |
@@ -137,7 +181,9 @@ Authorization: Bearer <token>
 
 ## 数据模型
 
-- `User`：一个微信 OpenID 对应一个学习用户，并保存每日目标。
+- `User`：一个微信 OpenID 对应一个学习用户，并保存每日目标、会员到期时间和学习资料。
+- `MembershipRedemptionCode`：只保存哈希的一次性会员兑换码。
+- `InitialAssessment`、`InitialAssessmentAnswer`：可重复能力测评和独立答题记录。
 - `Session`：保存哈希后的会话令牌及过期时间。
 - `StarterVocabulary`：全局共享的启蒙词内容。
 - `VocabularyItem`：用户个人词库；移除操作采用归档方式，保留历史练习记录。

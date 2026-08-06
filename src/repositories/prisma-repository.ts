@@ -10,8 +10,16 @@ import type {
   DashboardRecord,
   DialoguePromptRecord,
   IdentityContext,
+  InitialAssessmentAnswer,
+  InitialAssessmentRecord,
+  AssessmentDifficulty,
+  AssessmentScores,
+  LearnerProfile,
+  LearningGoal,
   LearningReport,
+  LearningGoals,
   LearningReportMode,
+  MembershipStatus,
   ReviewItemStatus,
   ReviewItemType,
   ReviewOverview,
@@ -24,7 +32,12 @@ import type {
   WordInput,
   WordRecord
 } from "../domain/types.js";
-import { currentStreakDays, shanghaiDateKey, shiftDateKey } from "../domain/date-key.js";
+import {
+  currentStreakDays,
+  shanghaiDateKey,
+  shiftDateKey,
+  weekStartDateKey
+} from "../domain/date-key.js";
 import { buildReviewOverview } from "../domain/review.js";
 import { DAILY_SCORE_GOAL, scoreForAttempt } from "../domain/scoring.js";
 import { sentenceCanUseVocabulary } from "../domain/sentence-coverage.js";
@@ -34,6 +47,8 @@ import {
 } from "../domain/spaced-repetition.js";
 import { buildWordMastery } from "../domain/word-mastery.js";
 import { AppError } from "../lib/errors.js";
+import { assessmentProfileComplete } from "../services/initial-assessment.js";
+import { buildPersonalizedLearningReport } from "../services/personalized-report.js";
 import type { AppRepository } from "./app-repository.js";
 
 function normalizeEnglish(value: string): string {
@@ -51,6 +66,52 @@ function shuffled<T>(items: T[]): T[] {
     [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
   }
   return result;
+}
+
+function membershipStatus(expiresAt: Date | null, now = new Date()): MembershipStatus {
+  return {
+    active: !!expiresAt && expiresAt.getTime() > now.getTime(),
+    expiresAt
+  };
+}
+
+function assessmentRecord(row: {
+  id: string;
+  status: string;
+  difficulty: string;
+  level: string | null;
+  scores: unknown;
+  summary: string | null;
+  startedAt: Date;
+  completedAt: Date | null;
+  answers: Array<{
+    questionKey: string;
+    dimension: string;
+    result: string;
+    answerText: string | null;
+    recognizedText: string | null;
+    score: number | null;
+    pronunciationScore: number | null;
+    accuracyScore: number | null;
+    fluencyScore: number | null;
+    completenessScore: number | null;
+  }>;
+}): InitialAssessmentRecord {
+  return {
+    id: row.id,
+    status: row.status === "COMPLETED" ? "COMPLETED" : "IN_PROGRESS",
+    difficulty: row.difficulty as AssessmentDifficulty,
+    level: row.level,
+    scores: row.scores && typeof row.scores === "object" ? row.scores as AssessmentScores : null,
+    summary: row.summary,
+    startedAt: row.startedAt,
+    completedAt: row.completedAt,
+    answers: row.answers.map((answer) => ({
+      ...answer,
+      dimension: answer.dimension as InitialAssessmentAnswer["dimension"],
+      result: answer.result as InitialAssessmentAnswer["result"]
+    }))
+  };
 }
 
 function dailyPlanTasks(value: unknown): DailyPlanTask[] {
@@ -100,6 +161,83 @@ export class PrismaAppRepository implements AppRepository {
     return { userId: user.id };
   }
 
+  async getMembershipStatus(context: IdentityContext): Promise<MembershipStatus> {
+    const user = await this.client.user.findUniqueOrThrow({
+      where: { id: context.userId },
+      select: { membershipExpiresAt: true }
+    });
+    return membershipStatus(user.membershipExpiresAt);
+  }
+
+  async setDevelopmentMembership(
+    context: IdentityContext,
+    active: boolean,
+    changedAt: Date
+  ): Promise<MembershipStatus> {
+    const membershipExpiresAt = active
+      ? new Date(changedAt.getTime() + 365 * 86_400_000)
+      : null;
+    await this.client.user.update({
+      where: { id: context.userId },
+      data: { membershipExpiresAt }
+    });
+    return membershipStatus(membershipExpiresAt, changedAt);
+  }
+
+  async createMembershipRedemptionCode(input: {
+    codeHash: string;
+    codeHint: string;
+    durationDays: number;
+    label?: string;
+    expiresAt?: Date;
+  }): Promise<void> {
+    await this.client.membershipRedemptionCode.create({
+      data: {
+        ...input,
+        label: input.label || null,
+        expiresAt: input.expiresAt || null
+      }
+    });
+  }
+
+  async redeemMembershipCode(
+    context: IdentityContext,
+    codeHash: string,
+    redeemedAt: Date
+  ): Promise<MembershipStatus> {
+    return this.client.$transaction(async (tx) => {
+      const code = await tx.membershipRedemptionCode.findUnique({ where: { codeHash } });
+      if (!code || code.redeemedAt || (code.expiresAt && code.expiresAt <= redeemedAt)) {
+        throw new AppError(400, "INVALID_REDEMPTION_CODE", "兑换码无效或已使用");
+      }
+      const redeemed = await tx.membershipRedemptionCode.updateMany({
+        where: {
+          id: code.id,
+          redeemedAt: null,
+          OR: [{ expiresAt: null }, { expiresAt: { gt: redeemedAt } }]
+        },
+        data: { redeemedAt, redeemedByUserId: context.userId }
+      });
+      if (redeemed.count !== 1) {
+        throw new AppError(400, "INVALID_REDEMPTION_CODE", "兑换码无效或已使用");
+      }
+      const user = await tx.user.findUniqueOrThrow({
+        where: { id: context.userId },
+        select: { membershipExpiresAt: true }
+      });
+      const startsAt =
+        user.membershipExpiresAt && user.membershipExpiresAt > redeemedAt
+          ? user.membershipExpiresAt
+          : redeemedAt;
+      const expiresAt = new Date(startsAt.getTime() + code.durationDays * 86_400_000);
+      await tx.user.update({
+        where: { id: context.userId },
+        data: { membershipExpiresAt: expiresAt }
+      });
+      return { active: true, expiresAt };
+    });
+  }
+
   async getProfile(context: IdentityContext): Promise<UserProfile> {
     const user = await this.client.user.findUniqueOrThrow({
       where: { id: context.userId },
@@ -134,10 +272,143 @@ export class PrismaAppRepository implements AppRepository {
     return this.getProfile(context);
   }
 
+  async getLearnerProfile(context: IdentityContext): Promise<LearnerProfile> {
+    const user = await this.client.user.findUniqueOrThrow({
+      where: { id: context.userId },
+      select: {
+        learnerAgeBand: true,
+        gradeLevel: true,
+        englishExperience: true,
+        learningGoals: true
+      }
+    });
+    const profile = {
+      ageBand: user.learnerAgeBand,
+      gradeLevel: user.gradeLevel,
+      englishExperience: user.englishExperience,
+      learningGoals: user.learningGoals as LearningGoal[]
+    };
+    return { ...profile, complete: assessmentProfileComplete(profile) };
+  }
+
+  async updateLearnerProfile(
+    context: IdentityContext,
+    input: Omit<LearnerProfile, "complete">
+  ): Promise<LearnerProfile> {
+    await this.client.user.update({
+      where: { id: context.userId },
+      data: {
+        learnerAgeBand: input.ageBand,
+        gradeLevel: input.gradeLevel,
+        englishExperience: input.englishExperience,
+        learningGoals: input.learningGoals
+      }
+    });
+    return this.getLearnerProfile(context);
+  }
+
+  async getLatestInitialAssessment(
+    context: IdentityContext
+  ): Promise<InitialAssessmentRecord | null> {
+    const assessment = await this.client.initialAssessment.findFirst({
+      where: { userId: context.userId },
+      include: { answers: { orderBy: { answeredAt: "asc" } } },
+      orderBy: { startedAt: "desc" }
+    });
+    return assessment ? assessmentRecord(assessment) : null;
+  }
+
+  async listCompletedAssessments(
+    context: IdentityContext,
+    limit: number
+  ): Promise<InitialAssessmentRecord[]> {
+    const assessments = await this.client.initialAssessment.findMany({
+      where: { userId: context.userId, status: "COMPLETED" },
+      include: { answers: { orderBy: { answeredAt: "asc" } } },
+      orderBy: { completedAt: "desc" },
+      take: Math.max(1, Math.min(limit, 20))
+    });
+    return assessments.map(assessmentRecord);
+  }
+
+  async countCompletedAssessments(context: IdentityContext): Promise<number> {
+    return this.client.initialAssessment.count({
+      where: { userId: context.userId, status: "COMPLETED" }
+    });
+  }
+
+  async createInitialAssessment(
+    context: IdentityContext,
+    difficulty: AssessmentDifficulty
+  ): Promise<InitialAssessmentRecord> {
+    const assessment = await this.client.initialAssessment.create({
+      data: { userId: context.userId, difficulty },
+      include: { answers: true }
+    });
+    return assessmentRecord(assessment);
+  }
+
+  async saveInitialAssessmentAnswer(
+    context: IdentityContext,
+    assessmentId: string,
+    answer: InitialAssessmentAnswer
+  ): Promise<InitialAssessmentRecord> {
+    await this.client.$transaction(async (tx) => {
+      const assessment = await tx.initialAssessment.findFirst({
+        where: { id: assessmentId, userId: context.userId, status: "IN_PROGRESS" },
+        select: { id: true }
+      });
+      if (!assessment) {
+        throw new AppError(404, "INITIAL_ASSESSMENT_NOT_FOUND", "未找到进行中的能力测评");
+      }
+      await tx.initialAssessmentAnswer.upsert({
+        where: { assessmentId_questionKey: { assessmentId, questionKey: answer.questionKey } },
+        create: { assessmentId, ...answer },
+        update: answer
+      });
+    });
+    const assessment = await this.client.initialAssessment.findUniqueOrThrow({
+      where: { id: assessmentId },
+      include: { answers: { orderBy: { answeredAt: "asc" } } }
+    });
+    return assessmentRecord(assessment);
+  }
+
+  async completeInitialAssessment(
+    context: IdentityContext,
+    assessmentId: string,
+    result: { level: string; scores: AssessmentScores; summary: string },
+    completedAt: Date
+  ): Promise<InitialAssessmentRecord> {
+    const updated = await this.client.initialAssessment.updateMany({
+      where: { id: assessmentId, userId: context.userId, status: "IN_PROGRESS" },
+      data: {
+        status: "COMPLETED",
+        level: result.level,
+        scores: result.scores as unknown as Prisma.InputJsonValue,
+        summary: result.summary,
+        completedAt
+      }
+    });
+    if (updated.count !== 1) {
+      throw new AppError(404, "INITIAL_ASSESSMENT_NOT_FOUND", "未找到进行中的能力测评");
+    }
+    const assessment = await this.client.initialAssessment.findUniqueOrThrow({
+      where: { id: assessmentId },
+      include: { answers: { orderBy: { answeredAt: "asc" } } }
+    });
+    return assessmentRecord(assessment);
+  }
+
+  async resetInitialAssessment(context: IdentityContext): Promise<void> {
+    await this.client.initialAssessment.deleteMany({ where: { userId: context.userId } });
+  }
+
   async getDashboard(context: IdentityContext): Promise<DashboardRecord> {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
     const todayKey = shanghaiDateKey();
+    const weekStart = weekStartDateKey(todayKey);
     const [user, wordCount, starterWordCount, todayAttempts, checkIns, weakWordCount, review] =
       await Promise.all([
         this.client.user.findUniqueOrThrow({ where: { id: context.userId } }),
@@ -181,6 +452,10 @@ export class PrismaAppRepository implements AppRepository {
         0
       ),
       dailyScoreGoal: user.dailyScoreGoal || DAILY_SCORE_GOAL,
+      weeklyGoalDays: user.weeklyGoalDays || 5,
+      weekCompletedDays: checkIns.filter(
+        (item) => item.dateKey >= weekStart && item.dateKey <= todayKey
+      ).length,
       accuracy:
         todayPracticeCount > 0 ? Math.round((todayCorrectCount / todayPracticeCount) * 100) : 0,
       checkedInToday: checkIns.some((item) => item.dateKey === todayKey),
@@ -188,6 +463,7 @@ export class PrismaAppRepository implements AppRepository {
       currentStreak: currentStreakDays(checkIns.map((item) => item.dateKey), todayKey),
       weakWordCount,
       pendingReviewCount: review.pendingCount,
+      membership: membershipStatus(user.membershipExpiresAt),
       modules: {
         reading: wordCount >= 1,
         choice: wordCount >= 4,
@@ -209,6 +485,17 @@ export class PrismaAppRepository implements AppRepository {
       select: { dailyScoreGoal: true }
     });
     return user.dailyScoreGoal;
+  }
+
+  async updateLearningGoals(
+    context: IdentityContext,
+    goals: LearningGoals
+  ): Promise<LearningGoals> {
+    return this.client.user.update({
+      where: { id: context.userId },
+      data: goals,
+      select: { dailyScoreGoal: true, weeklyGoalDays: true }
+    });
   }
 
   async checkInToday(context: IdentityContext): Promise<CheckInSummary> {
@@ -254,7 +541,10 @@ export class PrismaAppRepository implements AppRepository {
       checkedInToday: true,
       firstCheckInToday: !existing,
       totalDays: dateRows.length,
+      totalStudyDays: dateRows.length,
       currentStreak: currentStreakDays(dateRows.map((item) => item.dateKey), dateKey),
+      weekCompletedDays: dashboard.weekCompletedDays,
+      weeklyGoalDays: dashboard.weeklyGoalDays,
       todayScore: dashboard.todayScore,
       wordCount: dashboard.wordCount
     };
@@ -409,18 +699,39 @@ export class PrismaAppRepository implements AppRepository {
 
   async getLearningReport(context: IdentityContext): Promise<LearningReport> {
     const generatedDate = shanghaiDateKey();
-    const [words, attempts, checkIns] = await Promise.all([
+    const [user, words, attempts, checkIns, baseline] = await Promise.all([
+      this.client.user.findUniqueOrThrow({
+        where: { id: context.userId },
+        select: { membershipExpiresAt: true, learningGoals: true }
+      }),
       this.client.vocabularyItem.findMany({
         where: { userId: context.userId, archivedAt: null },
         include: { progress: true }
       }),
       this.client.practiceAttempt.findMany({
         where: { userId: context.userId },
-        select: { mode: true, result: true, occurredAt: true }
+        select: {
+          mode: true,
+          result: true,
+          occurredAt: true,
+          vocabularyItemId: true,
+          answerText: true,
+          recognizedText: true,
+          promptText: true,
+          referenceAnswer: true,
+          semanticScore: true,
+          pronunciationScore: true,
+          vocabularyItem: { select: { english: true } }
+        }
       }),
       this.client.dailyCheckIn.findMany({
         where: { userId: context.userId },
         select: { dateKey: true }
+      }),
+      this.client.initialAssessment.findFirst({
+        where: { userId: context.userId, status: "COMPLETED" },
+        select: { level: true, scores: true, completedAt: true },
+        orderBy: { completedAt: "desc" }
       })
     ]);
     const gradedAttempts = attempts.filter((item) => item.result !== "VIEWED");
@@ -483,6 +794,26 @@ export class PrismaAppRepository implements AppRepository {
       const gradedCount = correctCount + incorrectCount;
       return gradedCount >= 3 && (correctCount / gradedCount) * 100 >= 80;
     }).length;
+    const membership = membershipStatus(user.membershipExpiresAt);
+    const personalized = membership.active
+      ? buildPersonalizedLearningReport({
+          generatedDate,
+          attempts: attempts.map((attempt) => ({
+            ...attempt,
+            vocabularyEnglish: attempt.vocabularyItem?.english || null
+          })),
+          weakWords,
+          learningGoals: user.learningGoals as LearningGoal[],
+          baseline:
+            baseline?.level && baseline.scores && baseline.completedAt
+              ? {
+                  level: baseline.level,
+                  scores: baseline.scores as unknown as AssessmentScores,
+                  completedAt: baseline.completedAt
+                }
+              : null
+        })
+      : null;
     return {
       generatedDate,
       wordCount: words.length,
@@ -502,7 +833,9 @@ export class PrismaAppRepository implements AppRepository {
       learningWordCount: words.filter((word) => (word.progress?.attemptCount || 0) > 0).length,
       recentDays,
       modeStats: [...modeMap.values()].sort((left, right) => right.attempts - left.attempts),
-      weakWords
+      weakWords,
+      personalizedLocked: !membership.active,
+      personalized
     };
   }
 

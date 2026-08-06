@@ -16,6 +16,10 @@ const starterWords = [
   ["greeting", "goodbye", "goodbye", "再见"],
   ["greeting", "thank-you", "thank you", "谢谢"],
   ["greeting", "name", "name", "名字"],
+  ["greeting", "yes", "yes", "是；好的"],
+  ["greeting", "no", "no", "不；不是"],
+  ["greeting", "good", "good", "好的；不错的"],
+  ["greeting", "ok", "OK", "好的；可以"],
   ["number", "one", "one", "一"],
   ["number", "two", "two", "二"],
   ["number", "three", "three", "三"],
@@ -39,6 +43,29 @@ const starterWords = [
   ["sentence", "am", "am", "是（用于 I）"],
   ["sentence", "i", "I", "我"],
   ["sentence", "you", "you", "你；你们"],
+  ["sentence", "he", "he", "他"],
+  ["sentence", "she", "she", "她"],
+  ["sentence", "his", "his", "他的"],
+  ["sentence", "her", "her", "她的"],
+  ["sentence", "it", "it", "它"],
+  ["sentence", "this", "this", "这；这个"],
+  ["sentence", "that", "that", "那；那个"],
+  ["sentence", "my", "my", "我的"],
+  ["sentence", "your", "your", "你的；你们的"],
+  ["sentence", "me", "me", "我（宾格）"],
+  ["sentence", "have", "have", "有"],
+  ["sentence", "do", "do", "做；助动词"],
+  ["sentence", "like", "like", "喜欢"],
+  ["sentence", "want", "want", "想要"],
+  ["sentence", "can", "can", "能；会"],
+  ["sentence", "not", "not", "不；不是"],
+  ["sentence", "a", "a", "一个（用于辅音音素前）"],
+  ["sentence", "an", "an", "一个（用于元音音素前）"],
+  ["sentence", "the", "the", "这个；那个（定冠词）"],
+  ["sentence", "in", "in", "在……里面"],
+  ["sentence", "on", "on", "在……上面"],
+  ["sentence", "here", "here", "这里"],
+  ["sentence", "there", "there", "那里"],
   ["color", "color", "color", "颜色"],
   ["color", "red", "red", "红色"],
   ["color", "yellow", "yellow", "黄色"],
@@ -46,22 +73,15 @@ const starterWords = [
   ["color", "blue", "blue", "蓝色"],
   ["color", "black", "black", "黑色"],
   ["color", "white", "white", "白色"],
-  ["color", "pink", "pink", "粉色"],
   ["school", "book", "book", "书"],
   ["school", "pencil", "pencil", "铅笔"],
   ["school", "bag", "bag", "书包"],
-  ["school", "desk", "desk", "课桌"],
+  ["school", "table", "table", "桌子"],
   ["school", "chair", "chair", "椅子"],
   ["fruit", "apple", "apple", "苹果"],
   ["fruit", "banana", "banana", "香蕉"],
-  ["life", "mother", "mother", "妈妈"],
-  ["life", "father", "father", "爸爸"],
-  ["life", "sister", "sister", "姐妹"],
-  ["life", "brother", "brother", "兄弟"],
   ["life", "cat", "cat", "猫"],
-  ["life", "dog", "dog", "狗"],
-  ["life", "happy", "happy", "开心的"],
-  ["life", "sad", "sad", "难过的"]
+  ["life", "dog", "dog", "狗"]
 ] as const;
 
 await prisma.starterVocabulary.updateMany({
@@ -96,14 +116,12 @@ const sentencePrompts = [
   [
     "hello",
     "hello",
-    "你好，我叫艾米。",
-    "Hello, my name is Amy.",
-    ["hello my name is amy", "hello i am amy", "hi my name is amy", "hi i am amy"],
-    "先打招呼，再使用 My name is ... 或 I am ... 介绍名字。"
+    "你好，这是我的书。",
+    "Hello, this is my book.",
+    ["hello this is my book"],
+    "先用 Hello 打招呼，再用 This is my ... 介绍物品。"
   ],
-  ["goodbye", "goodbye", "再见，妈妈。", "Goodbye, Mom.", ["goodbye mom", "goodbye mother"], "Goodbye 表示再见。"],
-  ["thank-you", "thank you", "谢谢你。", "Thank you.", ["thank you", "thanks"], "Thank you 和 Thanks 都可以表达感谢。"],
-  ["name", "name", "我的名字叫艾米。", "My name is Amy.", ["my name is amy", "i am amy", "i'm amy"], "My name is ... 用来介绍名字。"],
+  ["name", "name", "这是我的名字。", "This is my name.", ["this is my name"], "This is my ... 用来介绍自己的事物。"],
   ["one-book", "one", "我有一本书。", "I have one book.", ["i have one book", "i have a book"], "one 表示一个。"],
   ["six-years-old", "six", "我六岁。", "I am six.", ["i am six", "i'm six", "i am six years old", "i'm six years old"], "年龄可以直接用 I am + 数字。"],
   ["eight-years-old", "eight", "我八岁。", "I am eight.", ["i am eight", "i'm eight", "i am eight years old", "i'm eight years old"], "年龄可以直接用 I am + 数字。"],
@@ -113,12 +131,28 @@ const sentencePrompts = [
   ["green-pencil", "green", "这支铅笔是绿色的。", "This pencil is green.", ["this pencil is green", "the pencil is green"], "This pencil 指这支铅笔。"],
   ["my-book", "book", "这是我的书。", "This is my book.", ["this is my book", "it is my book", "it's my book"], "This is my ... 用来介绍自己的物品。"],
   ["a-pencil", "pencil", "我有一支铅笔。", "I have a pencil.", ["i have a pencil", "i've got a pencil"], "I have ... 表示我有……"],
-  ["bag-on-chair", "bag", "我的书包在椅子上。", "My bag is on the chair.", ["my bag is on the chair", "the bag is on the chair"], "on the chair 表示在椅子上。"],
-  ["my-mother", "mother", "这是我的妈妈。", "This is my mother.", ["this is my mother", "she is my mother", "she's my mother"], "This is my ... 可以介绍家人。"],
-  ["happy-father", "father", "我的爸爸很开心。", "My father is happy.", ["my father is happy", "dad is happy", "my dad is happy"], "happy 表示开心的。"],
-  ["like-cats", "cat", "我喜欢猫。", "I like cats.", ["i like cats", "i like the cat", "i like cat"], "like 表示喜欢。"],
-  ["sad-dog", "sad", "这只狗很难过。", "The dog is sad.", ["the dog is sad", "this dog is sad", "the dog feels sad"], "sad 表示难过的。"]
+  ["an-apple", "an", "我有一个苹果。", "I have an apple.", ["i have an apple"], "元音音素前使用 an。"],
+  ["this-table", "table", "这是一张桌子。", "This is a table.", ["this is a table"], "This is a ... 用来介绍眼前的物品。"],
+  ["that-chair", "chair", "那是一把椅子。", "That is a chair.", ["that is a chair"], "That 表示离说话者较远的人或物。"],
+  ["his-book", "his", "这是他的书。", "This is his book.", ["this is his book"], "his 表示他的。"],
+  ["her-bag", "her", "那是她的书包。", "That is her bag.", ["that is her bag"], "her 表示她的。"],
+  ["have-cat", "cat", "我有一只猫。", "I have a cat.", ["i have a cat"], "I have ... 表示我有……"],
+  ["this-dog", "dog", "这是一只狗。", "This is a dog.", ["this is a dog", "it is a dog"], "This is a ... 可以介绍动物。"],
+  ["like-apple", "like", "我喜欢这个苹果。", "I like the apple.", ["i like the apple"], "like 表示喜欢。"],
+  ["want-banana", "want", "我想要一根香蕉。", "I want a banana.", ["i want a banana"], "want 表示想要。"],
+  ["can-do-it", "can", "我能做到。", "I can do it.", ["i can do it"], "can 表示能、会。"],
+  ["book-not-red", "not", "这本书不是红色的。", "The book is not red.", ["the book is not red"], "not 用来表达否定。"],
+  ["the-book", "the", "这本书是红色的。", "The book is red.", ["the book is red"], "the 用在明确的人或物前。"],
+  ["book-on-table", "on", "书在桌子上。", "The book is on the table.", ["the book is on the table"], "on 表示在……上面。"],
+  ["pencil-in-bag", "in", "铅笔在书包里。", "The pencil is in the bag.", ["the pencil is in the bag"], "in 表示在……里面。"],
+  ["book-here", "here", "书在这里。", "The book is here.", ["the book is here"], "here 表示这里。"],
+  ["bag-there", "there", "书包在那里。", "The bag is there.", ["the bag is there"], "there 表示那里。"]
 ] as const;
+
+await prisma.sentencePrompt.updateMany({
+  where: { key: { notIn: sentencePrompts.map(([key]) => key) } },
+  data: { active: false }
+});
 
 for (const [key, targetWord, promptChinese, referenceAnswer, acceptedAnswers, explanation] of sentencePrompts) {
   const sortOrder = sentencePrompts.findIndex((item) => item[0] === key) + 1;
@@ -167,7 +201,7 @@ const dialoguePrompts = [
     "What color is your book?",
     "你的书是什么颜色？",
     "My book is blue.",
-    ["my book is red", "my book is yellow", "my book is green", "my book is blue", "my book is black", "my book is white", "my book is pink", "it is red", "it is blue", "it's red", "it's blue"],
+    ["my book is red", "my book is yellow", "my book is green", "my book is blue", "my book is black", "my book is white", "it is red", "it is blue", "it's red", "it's blue"],
     "用基础包中的任意颜色回答书的颜色。"
   ],
   [
@@ -179,38 +213,43 @@ const dialoguePrompts = [
     "肯定或否定回答都可以，但要表达这是或不是自己的铅笔。"
   ],
   [
-    "ask-family",
-    "Who is she?",
-    "她是谁？",
-    "She is my mother.",
-    ["she is my mother", "she's my mother", "she is my sister", "she's my sister"],
-    "使用 mother 或 sister 介绍女性家庭成员。"
+    "ask-he-age",
+    "Is he six?",
+    "他六岁吗？",
+    "Yes, he is.",
+    ["yes", "yes he is", "no", "no he is not", "no he isn't"],
+    "使用 Yes 或 No 回答他的年龄是否正确。"
   ],
   [
-    "ask-cat",
-    "Do you like cats?",
-    "你喜欢猫吗？",
+    "ask-have-cat",
+    "Do you have a cat?",
+    "你有猫吗？",
     "Yes, I do.",
-    ["yes", "yes i do", "yes i like cats", "no", "no i don't", "no i do not"],
-    "肯定或否定回答都可以，表达是否喜欢猫。"
+    ["yes", "yes i do", "no", "no i don't", "no i do not"],
+    "肯定或否定回答都可以，表达自己是否有猫。"
   ],
   [
     "ask-feeling",
-    "How are you today?",
-    "你今天感觉怎么样？",
-    "I am happy.",
-    ["i am happy", "i'm happy", "i am sad", "i'm sad", "i am fine", "i'm fine", "fine", "happy", "sad"],
-    "使用 happy、sad 或 fine 回答自己的状态。"
+    "How are you?",
+    "你怎么样？",
+    "I am good.",
+    ["i am good", "i'm good", "good", "i am ok", "i'm ok", "ok"],
+    "使用 good 或 OK 回答自己的状态。"
   ],
   [
-    "reply-thanks",
-    "Thank you.",
-    "谢谢你。",
-    "You're welcome.",
-    ["you are welcome", "you're welcome", "welcome", "no problem", "that's okay"],
-    "对感谢作出礼貌回应。"
+    "ask-that-bag",
+    "Is that your bag?",
+    "那是你的书包吗？",
+    "Yes, it is.",
+    ["yes", "yes it is", "no", "no it is not", "no it isn't"],
+    "使用 Yes 或 No 回答物品是否属于自己。"
   ]
 ] as const;
+
+await prisma.dialoguePrompt.updateMany({
+  where: { key: { notIn: dialoguePrompts.map(([key]) => key) } },
+  data: { active: false }
+});
 
 for (const [key, question, questionChinese, referenceAnswer, acceptedAnswers, evaluationHint] of dialoguePrompts) {
   const sortOrder = dialoguePrompts.findIndex((item) => item[0] === key) + 1;

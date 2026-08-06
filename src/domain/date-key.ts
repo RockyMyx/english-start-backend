@@ -15,6 +15,13 @@ export function shiftDateKey(dateKey: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+export function weekStartDateKey(dateKey = shanghaiDateKey()): string {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  const daysSinceMonday = (weekday + 6) % 7;
+  return shiftDateKey(dateKey, -daysSinceMonday);
+}
+
 export function currentStreakDays(dateKeys: string[], today = shanghaiDateKey()): number {
   const dates = new Set(dateKeys);
   let cursor = dates.has(today) ? today : shiftDateKey(today, -1);

@@ -1,0 +1,2 @@
+ALTER TABLE "InitialAssessment"
+ADD COLUMN "difficulty" TEXT NOT NULL DEFAULT 'FOUNDATION';

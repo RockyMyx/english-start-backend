@@ -7,7 +7,12 @@ import type {
   DashboardRecord,
   DialoguePromptRecord,
   IdentityContext,
+  InitialAssessmentAnswer,
+  InitialAssessmentRecord,
+  LearnerProfile,
   LearningReport,
+  LearningGoals,
+  MembershipStatus,
   ReviewItemStatus,
   ReviewItemType,
   ReviewOverview,
@@ -17,6 +22,8 @@ import type {
   SessionRecord,
   StarterWordRecord,
   UserProfile,
+  AssessmentScores,
+  AssessmentDifficulty,
   WordInput,
   WordRecord
 } from "../domain/types.js";
@@ -30,6 +37,24 @@ export interface AppRepository {
   }): Promise<SessionRecord>;
   getSessionByTokenHash(tokenHash: string): Promise<SessionRecord | null>;
   getContext(userId: string): Promise<IdentityContext>;
+  getMembershipStatus(context: IdentityContext): Promise<MembershipStatus>;
+  setDevelopmentMembership(
+    context: IdentityContext,
+    active: boolean,
+    changedAt: Date
+  ): Promise<MembershipStatus>;
+  createMembershipRedemptionCode(input: {
+    codeHash: string;
+    codeHint: string;
+    durationDays: number;
+    label?: string;
+    expiresAt?: Date;
+  }): Promise<void>;
+  redeemMembershipCode(
+    context: IdentityContext,
+    codeHash: string,
+    redeemedAt: Date
+  ): Promise<MembershipStatus>;
   getDashboard(context: IdentityContext): Promise<DashboardRecord>;
   getProfile(context: IdentityContext): Promise<UserProfile>;
   updateProfile(
@@ -37,7 +62,38 @@ export interface AppRepository {
     input: { nickname?: string; englishName?: string }
   ): Promise<UserProfile>;
   updateAvatar(context: IdentityContext, avatarFileName: string): Promise<UserProfile>;
+  getLearnerProfile(context: IdentityContext): Promise<LearnerProfile>;
+  updateLearnerProfile(
+    context: IdentityContext,
+    input: Omit<LearnerProfile, "complete">
+  ): Promise<LearnerProfile>;
+  getLatestInitialAssessment(context: IdentityContext): Promise<InitialAssessmentRecord | null>;
+  listCompletedAssessments(
+    context: IdentityContext,
+    limit: number
+  ): Promise<InitialAssessmentRecord[]>;
+  countCompletedAssessments(context: IdentityContext): Promise<number>;
+  createInitialAssessment(
+    context: IdentityContext,
+    difficulty: AssessmentDifficulty
+  ): Promise<InitialAssessmentRecord>;
+  saveInitialAssessmentAnswer(
+    context: IdentityContext,
+    assessmentId: string,
+    answer: InitialAssessmentAnswer
+  ): Promise<InitialAssessmentRecord>;
+  completeInitialAssessment(
+    context: IdentityContext,
+    assessmentId: string,
+    result: { level: string; scores: AssessmentScores; summary: string },
+    completedAt: Date
+  ): Promise<InitialAssessmentRecord>;
+  resetInitialAssessment(context: IdentityContext): Promise<void>;
   updateDailyScoreGoal(context: IdentityContext, dailyScoreGoal: number): Promise<number>;
+  updateLearningGoals(
+    context: IdentityContext,
+    goals: LearningGoals
+  ): Promise<LearningGoals>;
   checkInToday(context: IdentityContext): Promise<CheckInSummary>;
   getTodayDailyPlan(context: IdentityContext): Promise<DailyPlanRecord>;
   getDailyPlanTaskWords(

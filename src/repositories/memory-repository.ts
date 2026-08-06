@@ -9,8 +9,16 @@ import type {
   DashboardRecord,
   DialoguePromptRecord,
   IdentityContext,
+  InitialAssessmentAnswer,
+  InitialAssessmentRecord,
+  AssessmentScores,
+  AssessmentDifficulty,
+  LearnerProfile,
+  LearningGoal,
   LearningReport,
+  LearningGoals,
   LearningReportMode,
+  MembershipStatus,
   ReviewItemStatus,
   ReviewItemType,
   ReviewOverview,
@@ -23,7 +31,12 @@ import type {
   WordInput,
   WordRecord
 } from "../domain/types.js";
-import { currentStreakDays, shanghaiDateKey, shiftDateKey } from "../domain/date-key.js";
+import {
+  currentStreakDays,
+  shanghaiDateKey,
+  shiftDateKey,
+  weekStartDateKey
+} from "../domain/date-key.js";
 import { buildReviewOverview } from "../domain/review.js";
 import { DAILY_SCORE_GOAL, scoreForAttempt } from "../domain/scoring.js";
 import { sentenceCanUseVocabulary } from "../domain/sentence-coverage.js";
@@ -33,15 +46,24 @@ import {
 } from "../domain/spaced-repetition.js";
 import { buildWordMastery } from "../domain/word-mastery.js";
 import { AppError } from "../lib/errors.js";
+import { assessmentProfileComplete } from "../services/initial-assessment.js";
+import { buildPersonalizedLearningReport } from "../services/personalized-report.js";
 import type { AppRepository } from "./app-repository.js";
 
 interface MemoryUser {
   id: string;
   openId: string;
   dailyScoreGoal: number;
+  weeklyGoalDays: number;
   nickname: string | null;
   englishName: string | null;
   avatarFileName: string | null;
+  membershipExpiresAt: Date | null;
+  learnerAgeBand: string | null;
+  gradeLevel: string | null;
+  englishExperience: string | null;
+  learningGoals: LearningGoal[];
+  initialAssessments: InitialAssessmentRecord[];
   words: WordRecord[];
   attempts: Array<AttemptInput & { occurredAt: Date }>;
   checkIns: string[];
@@ -70,6 +92,10 @@ const starterWordData = [
   ["greeting", "goodbye", "goodbye", "再见"],
   ["greeting", "thank-you", "thank you", "谢谢"],
   ["greeting", "name", "name", "名字"],
+  ["greeting", "yes", "yes", "是；好的"],
+  ["greeting", "no", "no", "不；不是"],
+  ["greeting", "good", "good", "好的；不错的"],
+  ["greeting", "ok", "OK", "好的；可以"],
   ["number", "one", "one", "一"],
   ["number", "two", "two", "二"],
   ["number", "three", "three", "三"],
@@ -93,6 +119,29 @@ const starterWordData = [
   ["sentence", "am", "am", "是（用于 I）"],
   ["sentence", "i", "I", "我"],
   ["sentence", "you", "you", "你；你们"],
+  ["sentence", "he", "he", "他"],
+  ["sentence", "she", "she", "她"],
+  ["sentence", "his", "his", "他的"],
+  ["sentence", "her", "her", "她的"],
+  ["sentence", "it", "it", "它"],
+  ["sentence", "this", "this", "这；这个"],
+  ["sentence", "that", "that", "那；那个"],
+  ["sentence", "my", "my", "我的"],
+  ["sentence", "your", "your", "你的；你们的"],
+  ["sentence", "me", "me", "我（宾格）"],
+  ["sentence", "have", "have", "有"],
+  ["sentence", "do", "do", "做；助动词"],
+  ["sentence", "like", "like", "喜欢"],
+  ["sentence", "want", "want", "想要"],
+  ["sentence", "can", "can", "能；会"],
+  ["sentence", "not", "not", "不；不是"],
+  ["sentence", "a", "a", "一个（用于辅音音素前）"],
+  ["sentence", "an", "an", "一个（用于元音音素前）"],
+  ["sentence", "the", "the", "这个；那个（定冠词）"],
+  ["sentence", "in", "in", "在……里面"],
+  ["sentence", "on", "on", "在……上面"],
+  ["sentence", "here", "here", "这里"],
+  ["sentence", "there", "there", "那里"],
   ["color", "color", "color", "颜色"],
   ["color", "red", "red", "红色"],
   ["color", "yellow", "yellow", "黄色"],
@@ -100,22 +149,15 @@ const starterWordData = [
   ["color", "blue", "blue", "蓝色"],
   ["color", "black", "black", "黑色"],
   ["color", "white", "white", "白色"],
-  ["color", "pink", "pink", "粉色"],
   ["school", "book", "book", "书"],
   ["school", "pencil", "pencil", "铅笔"],
   ["school", "bag", "bag", "书包"],
-  ["school", "desk", "desk", "课桌"],
+  ["school", "table", "table", "桌子"],
   ["school", "chair", "chair", "椅子"],
   ["fruit", "apple", "apple", "苹果"],
   ["fruit", "banana", "banana", "香蕉"],
-  ["life", "mother", "mother", "妈妈"],
-  ["life", "father", "father", "爸爸"],
-  ["life", "sister", "sister", "姐妹"],
-  ["life", "brother", "brother", "兄弟"],
   ["life", "cat", "cat", "猫"],
-  ["life", "dog", "dog", "狗"],
-  ["life", "happy", "happy", "开心的"],
-  ["life", "sad", "sad", "难过的"]
+  ["life", "dog", "dog", "狗"]
 ] as const;
 
 const starterWords: StarterWordRecord[] = starterWordData.map(
@@ -158,6 +200,15 @@ function normalized(value: string): string {
 export class MemoryAppRepository implements AppRepository {
   private users: MemoryUser[] = [];
   private sessions: Array<SessionRecord & { tokenHash: string }> = [];
+  private membershipCodes: Array<{
+    codeHash: string;
+    codeHint: string;
+    durationDays: number;
+    label: string | null;
+    expiresAt: Date | null;
+    redeemedAt: Date | null;
+    redeemedByUserId: string | null;
+  }> = [];
 
   async ensureIdentity(openId: string): Promise<IdentityContext> {
     let user = this.users.find((item) => item.openId === openId);
@@ -166,9 +217,16 @@ export class MemoryAppRepository implements AppRepository {
         id: randomUUID(),
         openId,
         dailyScoreGoal: 50,
+        weeklyGoalDays: 5,
         nickname: null,
         englishName: null,
         avatarFileName: null,
+        membershipExpiresAt: null,
+        learnerAgeBand: null,
+        gradeLevel: null,
+        englishExperience: null,
+        learningGoals: [],
+        initialAssessments: [],
         words: [],
         attempts: [],
         checkIns: [],
@@ -201,6 +259,64 @@ export class MemoryAppRepository implements AppRepository {
     return { userId };
   }
 
+  async getMembershipStatus(context: IdentityContext): Promise<MembershipStatus> {
+    const expiresAt = this.user(context).membershipExpiresAt;
+    return { active: !!expiresAt && expiresAt > new Date(), expiresAt };
+  }
+
+  async setDevelopmentMembership(
+    context: IdentityContext,
+    active: boolean,
+    changedAt: Date
+  ): Promise<MembershipStatus> {
+    const user = this.user(context);
+    user.membershipExpiresAt = active
+      ? new Date(changedAt.getTime() + 365 * 86_400_000)
+      : null;
+    return {
+      active,
+      expiresAt: user.membershipExpiresAt
+    };
+  }
+
+  async createMembershipRedemptionCode(input: {
+    codeHash: string;
+    codeHint: string;
+    durationDays: number;
+    label?: string;
+    expiresAt?: Date;
+  }): Promise<void> {
+    this.membershipCodes.push({
+      ...input,
+      label: input.label || null,
+      expiresAt: input.expiresAt || null,
+      redeemedAt: null,
+      redeemedByUserId: null
+    });
+  }
+
+  async redeemMembershipCode(
+    context: IdentityContext,
+    codeHash: string,
+    redeemedAt: Date
+  ): Promise<MembershipStatus> {
+    const code = this.membershipCodes.find((item) => item.codeHash === codeHash);
+    if (!code || code.redeemedAt || (code.expiresAt && code.expiresAt <= redeemedAt)) {
+      throw new AppError(400, "INVALID_REDEMPTION_CODE", "兑换码无效或已使用");
+    }
+    const user = this.user(context);
+    code.redeemedAt = redeemedAt;
+    code.redeemedByUserId = context.userId;
+    const startsAt =
+      user.membershipExpiresAt && user.membershipExpiresAt > redeemedAt
+        ? user.membershipExpiresAt
+        : redeemedAt;
+    user.membershipExpiresAt = new Date(
+      startsAt.getTime() + code.durationDays * 86_400_000
+    );
+    return { active: true, expiresAt: user.membershipExpiresAt };
+  }
+
   async getProfile(context: IdentityContext): Promise<UserProfile> {
     const user = this.user(context);
     return {
@@ -225,6 +341,117 @@ export class MemoryAppRepository implements AppRepository {
     return this.getProfile(context);
   }
 
+  async getLearnerProfile(context: IdentityContext): Promise<LearnerProfile> {
+    const user = this.user(context);
+    const profile = {
+      ageBand: user.learnerAgeBand,
+      gradeLevel: user.gradeLevel,
+      englishExperience: user.englishExperience,
+      learningGoals: [...user.learningGoals]
+    };
+    return { ...profile, complete: assessmentProfileComplete(profile) };
+  }
+
+  async updateLearnerProfile(
+    context: IdentityContext,
+    input: Omit<LearnerProfile, "complete">
+  ): Promise<LearnerProfile> {
+    const user = this.user(context);
+    user.learnerAgeBand = input.ageBand;
+    user.gradeLevel = input.gradeLevel;
+    user.englishExperience = input.englishExperience;
+    user.learningGoals = [...input.learningGoals];
+    return this.getLearnerProfile(context);
+  }
+
+  async getLatestInitialAssessment(
+    context: IdentityContext
+  ): Promise<InitialAssessmentRecord | null> {
+    const assessments = this.user(context).initialAssessments;
+    return assessments.length ? assessments[assessments.length - 1] : null;
+  }
+
+  async listCompletedAssessments(
+    context: IdentityContext,
+    limit: number
+  ): Promise<InitialAssessmentRecord[]> {
+    return this.user(context).initialAssessments
+      .filter((assessment) => assessment.status === "COMPLETED")
+      .sort(
+        (left, right) =>
+          (right.completedAt?.getTime() || 0) - (left.completedAt?.getTime() || 0)
+      )
+      .slice(0, Math.max(1, Math.min(limit, 20)));
+  }
+
+  async countCompletedAssessments(context: IdentityContext): Promise<number> {
+    return this.user(context).initialAssessments.filter(
+      (assessment) => assessment.status === "COMPLETED"
+    ).length;
+  }
+
+  async createInitialAssessment(
+    context: IdentityContext,
+    difficulty: AssessmentDifficulty
+  ): Promise<InitialAssessmentRecord> {
+    const assessment: InitialAssessmentRecord = {
+      id: randomUUID(),
+      status: "IN_PROGRESS",
+      difficulty,
+      level: null,
+      scores: null,
+      summary: null,
+      startedAt: new Date(),
+      completedAt: null,
+      answers: []
+    };
+    this.user(context).initialAssessments.push(assessment);
+    return assessment;
+  }
+
+  async saveInitialAssessmentAnswer(
+    context: IdentityContext,
+    assessmentId: string,
+    answer: InitialAssessmentAnswer
+  ): Promise<InitialAssessmentRecord> {
+    const assessment = this.user(context).initialAssessments.find(
+      (item) => item.id === assessmentId && item.status === "IN_PROGRESS"
+    );
+    if (!assessment) {
+      throw new AppError(404, "INITIAL_ASSESSMENT_NOT_FOUND", "未找到进行中的能力测评");
+    }
+    const existingIndex = assessment.answers.findIndex(
+      (item) => item.questionKey === answer.questionKey
+    );
+    if (existingIndex >= 0) assessment.answers[existingIndex] = answer;
+    else assessment.answers.push(answer);
+    return assessment;
+  }
+
+  async completeInitialAssessment(
+    context: IdentityContext,
+    assessmentId: string,
+    result: { level: string; scores: AssessmentScores; summary: string },
+    completedAt: Date
+  ): Promise<InitialAssessmentRecord> {
+    const assessment = this.user(context).initialAssessments.find(
+      (item) => item.id === assessmentId && item.status === "IN_PROGRESS"
+    );
+    if (!assessment) {
+      throw new AppError(404, "INITIAL_ASSESSMENT_NOT_FOUND", "未找到进行中的能力测评");
+    }
+    assessment.status = "COMPLETED";
+    assessment.level = result.level;
+    assessment.scores = result.scores;
+    assessment.summary = result.summary;
+    assessment.completedAt = completedAt;
+    return assessment;
+  }
+
+  async resetInitialAssessment(context: IdentityContext): Promise<void> {
+    this.user(context).initialAssessments = [];
+  }
+
   async getDashboard(context: IdentityContext): Promise<DashboardRecord> {
     const user = this.user(context);
     const startOfToday = new Date();
@@ -233,6 +460,7 @@ export class MemoryAppRepository implements AppRepository {
     const correctAttempts = todayAttempts.filter((item) => item.result === "CORRECT");
     const starterCount = user.words.filter((item) => item.source === "STARTER").length;
     const todayKey = shanghaiDateKey();
+    const weekStart = weekStartDateKey(todayKey);
     return {
       nickname: user.nickname,
       wordCount: user.words.length,
@@ -244,6 +472,10 @@ export class MemoryAppRepository implements AppRepository {
         0
       ),
       dailyScoreGoal: user.dailyScoreGoal || DAILY_SCORE_GOAL,
+      weeklyGoalDays: user.weeklyGoalDays || 5,
+      weekCompletedDays: user.checkIns.filter(
+        (dateKey) => dateKey >= weekStart && dateKey <= todayKey
+      ).length,
       accuracy: todayAttempts.length
         ? Math.round((correctAttempts.length / todayAttempts.length) * 100)
         : 0,
@@ -252,6 +484,10 @@ export class MemoryAppRepository implements AppRepository {
       currentStreak: currentStreakDays(user.checkIns, todayKey),
       weakWordCount: user.words.filter((word) => word.incorrectCount > 0).length,
       pendingReviewCount: (await this.getReviewOverview(context)).pendingCount,
+      membership: {
+        active: !!user.membershipExpiresAt && user.membershipExpiresAt > new Date(),
+        expiresAt: user.membershipExpiresAt
+      },
       modules: {
         reading: user.words.length >= 1,
         choice: user.words.length >= 4,
@@ -270,6 +506,19 @@ export class MemoryAppRepository implements AppRepository {
     const user = this.user(context);
     user.dailyScoreGoal = dailyScoreGoal;
     return user.dailyScoreGoal;
+  }
+
+  async updateLearningGoals(
+    context: IdentityContext,
+    goals: LearningGoals
+  ): Promise<LearningGoals> {
+    const user = this.user(context);
+    user.dailyScoreGoal = goals.dailyScoreGoal;
+    user.weeklyGoalDays = goals.weeklyGoalDays;
+    return {
+      dailyScoreGoal: user.dailyScoreGoal,
+      weeklyGoalDays: user.weeklyGoalDays
+    };
   }
 
   async checkInToday(context: IdentityContext): Promise<CheckInSummary> {
@@ -296,7 +545,10 @@ export class MemoryAppRepository implements AppRepository {
       checkedInToday: true,
       firstCheckInToday,
       totalDays: user.checkIns.length,
+      totalStudyDays: user.checkIns.length,
       currentStreak: currentStreakDays(user.checkIns, dateKey),
+      weekCompletedDays: dashboard.weekCompletedDays,
+      weeklyGoalDays: dashboard.weeklyGoalDays,
       todayScore: dashboard.todayScore,
       wordCount: dashboard.wordCount
     };
@@ -480,6 +732,12 @@ export class MemoryAppRepository implements AppRepository {
           right.incorrectCount - left.incorrectCount || left.accuracy - right.accuracy
       )
       .slice(0, 12);
+    const membershipActive = Boolean(
+      user.membershipExpiresAt && user.membershipExpiresAt > new Date()
+    );
+    const baselineAssessment = [...user.initialAssessments]
+      .reverse()
+      .find((assessment) => assessment.status === "COMPLETED");
     return {
       generatedDate,
       wordCount: user.words.length,
@@ -504,7 +762,37 @@ export class MemoryAppRepository implements AppRepository {
       learningWordCount: user.words.filter((word) => word.attemptCount > 0).length,
       recentDays,
       modeStats: [...modeMap.values()].sort((left, right) => right.attempts - left.attempts),
-      weakWords
+      weakWords,
+      personalizedLocked: !membershipActive,
+      personalized: membershipActive
+        ? buildPersonalizedLearningReport({
+            generatedDate,
+            attempts: user.attempts.map((attempt) => ({
+              ...attempt,
+              vocabularyItemId: attempt.vocabularyItemId || null,
+              vocabularyEnglish:
+                user.words.find((word) => word.id === attempt.vocabularyItemId)?.english || null,
+              answerText: attempt.answerText || null,
+              recognizedText: attempt.recognizedText || null,
+              promptText: attempt.promptText || null,
+              referenceAnswer: attempt.referenceAnswer || null,
+              semanticScore: attempt.semanticScore ?? null,
+              pronunciationScore: attempt.pronunciationScore ?? null
+            })),
+            weakWords,
+            learningGoals: user.learningGoals,
+            baseline:
+              baselineAssessment?.level &&
+              baselineAssessment.scores &&
+              baselineAssessment.completedAt
+                ? {
+                    level: baselineAssessment.level,
+                    scores: baselineAssessment.scores,
+                    completedAt: baselineAssessment.completedAt
+                  }
+                : null
+          })
+        : null
     };
   }
 

@@ -15,6 +15,11 @@ export interface IdentityContext {
   userId: string;
 }
 
+export interface MembershipStatus {
+  active: boolean;
+  expiresAt: Date | null;
+}
+
 export interface SessionRecord {
   id: string;
   userId: string;
@@ -38,19 +43,103 @@ export interface DashboardRecord {
   todayCorrectCount: number;
   todayScore: number;
   dailyScoreGoal: number;
+  weeklyGoalDays: number;
+  weekCompletedDays: number;
   accuracy: number;
   checkedInToday: boolean;
   checkInDays: number;
   currentStreak: number;
   weakWordCount: number;
   pendingReviewCount: number;
+  membership: MembershipStatus;
   modules: ModuleAvailability;
+}
+
+export interface LearningGoals {
+  dailyScoreGoal: number;
+  weeklyGoalDays: number;
 }
 
 export interface UserProfile {
   nickname: string | null;
   englishName: string | null;
   avatarPath: string | null;
+}
+
+export type LearningGoal =
+  | "BALANCED"
+  | "VOCABULARY"
+  | "SPELLING"
+  | "PRONUNCIATION"
+  | "SPEAKING"
+  | "SCHOOL";
+
+export interface LearnerProfile {
+  ageBand: string | null;
+  gradeLevel: string | null;
+  englishExperience: string | null;
+  learningGoals: LearningGoal[];
+  complete: boolean;
+}
+
+export type AssessmentDimension =
+  | "RECOGNITION"
+  | "SPELLING"
+  | "PRONUNCIATION"
+  | "EXPRESSION";
+
+export type AssessmentQuestionType = "CHOICE" | "TEXT" | "VOICE";
+export type AssessmentAnswerResult = "CORRECT" | "INCORRECT" | "SKIPPED";
+export type AssessmentDifficulty = "FOUNDATION" | "STANDARD" | "ADVANCED";
+
+export interface InitialAssessmentQuestion {
+  key: string;
+  dimension: AssessmentDimension;
+  type: AssessmentQuestionType;
+  prompt: string;
+  instruction: string;
+  audioText: string | null;
+  options: Array<{ id: string; text: string }>;
+}
+
+export interface InitialAssessmentAnswer {
+  questionKey: string;
+  dimension: AssessmentDimension;
+  result: AssessmentAnswerResult;
+  answerText: string | null;
+  recognizedText: string | null;
+  score: number | null;
+  pronunciationScore: number | null;
+  accuracyScore: number | null;
+  fluencyScore: number | null;
+  completenessScore: number | null;
+}
+
+export interface AssessmentScores {
+  recognition: number | null;
+  spelling: number | null;
+  pronunciation: number | null;
+  expression: number | null;
+}
+
+export interface InitialAssessmentRecord {
+  id: string;
+  status: "IN_PROGRESS" | "COMPLETED";
+  difficulty: AssessmentDifficulty;
+  level: string | null;
+  scores: AssessmentScores | null;
+  summary: string | null;
+  startedAt: Date;
+  completedAt: Date | null;
+  answers: InitialAssessmentAnswer[];
+}
+
+export interface InitialAssessmentResult {
+  id: string;
+  level: string;
+  scores: AssessmentScores;
+  summary: string;
+  completedAt: Date;
 }
 
 export type ReviewItemType = "WORD" | "SENTENCE" | "DIALOGUE";
@@ -199,7 +288,10 @@ export interface CheckInSummary {
   checkedInToday: boolean;
   firstCheckInToday: boolean;
   totalDays: number;
+  totalStudyDays: number;
   currentStreak: number;
+  weekCompletedDays: number;
+  weeklyGoalDays: number;
   todayScore: number;
   wordCount: number;
 }
@@ -254,6 +346,34 @@ export interface LearningReportMode {
   score: number;
 }
 
+export type CapabilityKey = "RECOGNITION" | "SPELLING" | "PRONUNCIATION" | "EXPRESSION";
+
+export interface PersonalizedCapability {
+  key: CapabilityKey;
+  label: string;
+  performance: string;
+  basis: string;
+  trend: "UP" | "STABLE" | "DOWN" | "INSUFFICIENT";
+}
+
+export interface PersonalizedLearningReport {
+  summary: string;
+  baseline: {
+    level: string;
+    scores: AssessmentScores;
+    completedAt: Date;
+  } | null;
+  capabilities: PersonalizedCapability[];
+  evidence: {
+    newlyMasteredWords: string[];
+    expressions: string[];
+    pronunciationHighlights: string[];
+    confusions: string[];
+  };
+  nextStep: string;
+  focusDimensions: CapabilityKey[];
+}
+
 export interface LearningReport {
   generatedDate: string;
   wordCount: number;
@@ -269,6 +389,8 @@ export interface LearningReport {
   recentDays: LearningReportDay[];
   modeStats: LearningReportMode[];
   weakWords: WeakWordRecord[];
+  personalizedLocked: boolean;
+  personalized: PersonalizedLearningReport | null;
 }
 
 export interface AttemptInput {

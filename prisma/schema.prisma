@@ -38,6 +38,12 @@ model User {
   englishName     String?
   avatarFileName  String?
   dailyScoreGoal  Int                @default(50)
+  weeklyGoalDays  Int                @default(5)
+  membershipExpiresAt DateTime?
+  learnerAgeBand      String?
+  gradeLevel          String?
+  englishExperience   String?
+  learningGoals       String[]           @default([])
   sessions        Session[]
   vocabularyItems VocabularyItem[]
   practiceAttempts PracticeAttempt[]
@@ -45,8 +51,63 @@ model User {
   dailyCheckIns   DailyCheckIn[]
   reviewItemStates ReviewItemState[]
   dailyPlans      DailyPlan[]
+  redeemedMembershipCodes MembershipRedemptionCode[]
+  initialAssessments InitialAssessment[]
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
+}
+
+model InitialAssessment {
+  id          String                    @id @default(uuid())
+  userId      String
+  status      String                    @default("IN_PROGRESS")
+  difficulty  String                    @default("FOUNDATION")
+  level       String?
+  scores      Json?
+  summary     String?
+  user        User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  answers     InitialAssessmentAnswer[]
+  startedAt   DateTime                  @default(now())
+  completedAt DateTime?
+  updatedAt   DateTime                  @updatedAt
+
+  @@index([userId, status, startedAt])
+}
+
+model InitialAssessmentAnswer {
+  id                   String            @id @default(uuid())
+  assessmentId         String
+  questionKey          String
+  dimension            String
+  result               String
+  answerText           String?
+  recognizedText       String?
+  score                Float?
+  pronunciationScore   Float?
+  accuracyScore        Float?
+  fluencyScore         Float?
+  completenessScore    Float?
+  assessment           InitialAssessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  answeredAt           DateTime          @default(now())
+
+  @@unique([assessmentId, questionKey])
+  @@index([assessmentId, dimension])
+}
+
+model MembershipRedemptionCode {
+  id               String   @id @default(uuid())
+  codeHash         String   @unique
+  codeHint         String
+  durationDays     Int      @default(7)
+  label            String?
+  expiresAt        DateTime?
+  redeemedAt       DateTime?
+  redeemedByUserId String?
+  redeemedBy       User?    @relation(fields: [redeemedByUserId], references: [id], onDelete: SetNull)
+  createdAt        DateTime @default(now())
+
+  @@index([redeemedByUserId, redeemedAt])
+  @@index([expiresAt])
 }
 
 model DailyCheckIn {

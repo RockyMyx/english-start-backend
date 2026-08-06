@@ -3,7 +3,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AppConfig } from "./config.js";
 import { buildApp } from "./app.js";
+import { sha256 } from "./lib/crypto.js";
 import { MemoryAppRepository } from "./repositories/memory-repository.js";
+import { redemptionCodeHash } from "./services/membership-service.js";
 
 const config: AppConfig = {
   nodeEnv: "test",
@@ -48,9 +50,32 @@ async function login(app: Awaited<ReturnType<typeof buildApp>>) {
   return response.json<{ token: string }>().token;
 }
 
+async function redeemMembership(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  repository: MemoryAppRepository,
+  headers: { authorization: string },
+  code = "ES7D-TEST-TEST-0001"
+) {
+  await repository.createMembershipRedemptionCode({
+    codeHash: redemptionCodeHash(code),
+    codeHint: code.slice(-4),
+    durationDays: 7
+  });
+  const redeemed = await app.inject({
+    method: "POST",
+    url: "/membership/redeem",
+    headers,
+    payload: { code }
+  });
+  expect(redeemed.statusCode).toBe(200);
+  expect(redeemed.json()).toMatchObject({ active: true });
+  return redeemed;
+}
+
 describe("English Start API", () => {
-  it("creates an empty single-user account and allows direct word entry", async () => {
-    const app = await buildApp({ repository: new MemoryAppRepository(), config });
+  it("keeps direct word entry for members only", async () => {
+    const repository = new MemoryAppRepository();
+    const app = await buildApp({ repository, config });
     apps.push(app);
     const token = await login(app);
     const headers = { authorization: `Bearer ${token}` };
@@ -61,9 +86,21 @@ describe("English Start API", () => {
       wordCount: 0,
       todayScore: 0,
       dailyScoreGoal: 50,
+      weeklyGoalDays: 5,
+      weekCompletedDays: 0,
       modules: { choice: false, dictation: false, sentence: false, dialogue: false }
     });
 
+    const denied = await app.inject({
+      method: "POST",
+      url: "/words",
+      headers,
+      payload: { english: "apple", chinese: "苹果" }
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toMatchObject({ error: "MEMBERSHIP_REQUIRED" });
+
+    await redeemMembership(app, repository, headers);
     const added = await app.inject({
       method: "POST",
       url: "/words",
@@ -79,7 +116,7 @@ describe("English Start API", () => {
     });
   });
 
-  it("stores a custom daily score goal for the current user", async () => {
+  it("stores daily and weekly learning goals for the current user", async () => {
     const app = await buildApp({ repository: new MemoryAppRepository(), config });
     apps.push(app);
     const token = await login(app);
@@ -87,20 +124,30 @@ describe("English Start API", () => {
 
     const updated = await app.inject({
       method: "PUT",
-      url: "/me/daily-goal",
+      url: "/me/goals",
       headers,
-      payload: { dailyScoreGoal: 80 }
+      payload: { dailyScoreGoal: 80, weeklyGoalDays: 6 }
     });
     expect(updated.statusCode).toBe(200);
-    expect(updated.json()).toEqual({ dailyScoreGoal: 80 });
+    expect(updated.json()).toEqual({ dailyScoreGoal: 80, weeklyGoalDays: 6 });
 
     const me = await app.inject({ method: "GET", url: "/me", headers });
-    expect(me.json()).toMatchObject({ dailyScoreGoal: 80 });
+    expect(me.json()).toMatchObject({ dailyScoreGoal: 80, weeklyGoalDays: 6 });
+
+    const invalid = await app.inject({
+      method: "PUT",
+      url: "/me/goals",
+      headers,
+      payload: { dailyScoreGoal: 80, weeklyGoalDays: 8 }
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json()).toMatchObject({ error: "INVALID_WEEKLY_GOAL_DAYS" });
   });
 
   it("recognizes photographed words before batch importing them", async () => {
+    const repository = new MemoryAppRepository();
     const app = await buildApp({
-      repository: new MemoryAppRepository(),
+      repository,
       config,
       imageWordResolver: async () => [
         { english: "apple", chinese: "苹果" },
@@ -110,6 +157,7 @@ describe("English Start API", () => {
     apps.push(app);
     const token = await login(app);
     const headers = { authorization: `Bearer ${token}` };
+    await redeemMembership(app, repository, headers, "ES7D-TEST-TEST-0002");
     const boundary = "----english-start-photo";
     const payload = Buffer.concat([
       Buffer.from(
@@ -163,11 +211,39 @@ describe("English Start API", () => {
       count: number;
       words: Array<{ english: string }>;
     }>();
-    expect(previewBody).toMatchObject({ name: "启蒙 50 词", count: 50 });
+    expect(previewBody).toMatchObject({ name: "启蒙 70 词", count: 70 });
     expect(previewBody.words.some((word) => word.english === "old")).toBe(false);
-    expect(previewBody.words.map((word) => word.english)).toEqual(
-      expect.arrayContaining(["what", "how old", "I", "apple", "banana"])
+    const starterEnglishWords = previewBody.words.map((word) => word.english);
+    expect(starterEnglishWords).toEqual(
+      expect.arrayContaining([
+        "what",
+        "how old",
+        "I",
+        "apple",
+        "banana",
+        "table",
+        "yes",
+        "he",
+        "a",
+        "an",
+        "like",
+        "there"
+      ])
     );
+    expect(
+      starterEnglishWords.filter((word) =>
+        [
+        "happy",
+        "sad",
+        "mother",
+        "father",
+        "sister",
+        "brother",
+        "desk",
+        "pink"
+        ].includes(word)
+      )
+    ).toEqual([]);
 
     const first = await app.inject({
       method: "POST",
@@ -175,19 +251,368 @@ describe("English Start API", () => {
       headers
     });
     expect(first.statusCode).toBe(201);
-    expect(first.json()).toMatchObject({ imported: 50, total: 50 });
+    expect(first.json()).toMatchObject({ imported: 70, total: 70 });
 
     const second = await app.inject({
       method: "POST",
       url: "/starter-pack/import",
       headers
     });
-    expect(second.json()).toMatchObject({ imported: 0, total: 50 });
+    expect(second.json()).toMatchObject({ imported: 0, total: 70 });
 
     const me = await app.inject({ method: "GET", url: "/me", headers });
     expect(me.json()).toMatchObject({
-      wordCount: 50,
+      wordCount: 70,
       modules: { choice: true, dictation: true, sentence: true, dialogue: true }
+    });
+  });
+
+  it("redeems each code once and stacks membership time", async () => {
+    const repository = new MemoryAppRepository();
+    const app = await buildApp({ repository, config });
+    apps.push(app);
+    const token = await login(app);
+    const headers = { authorization: `Bearer ${token}` };
+
+    const first = await redeemMembership(app, repository, headers, "ES7D-TEST-STACK-001");
+    const firstExpiry = new Date(first.json<{ expiresAt: string }>().expiresAt);
+    const repeated = await app.inject({
+      method: "POST",
+      url: "/membership/redeem",
+      headers,
+      payload: { code: "ES7D-TEST-STACK-001" }
+    });
+    expect(repeated.statusCode).toBe(400);
+    expect(repeated.json()).toMatchObject({ error: "INVALID_REDEMPTION_CODE" });
+
+    const second = await redeemMembership(app, repository, headers, "ES7D-TEST-STACK-002");
+    const secondExpiry = new Date(second.json<{ expiresAt: string }>().expiresAt);
+    expect(secondExpiry.getTime() - firstExpiry.getTime()).toBe(7 * 86_400_000);
+  });
+
+  it("switches the current user between member and free states in debug mode", async () => {
+    const repository = new MemoryAppRepository();
+    const app = await buildApp({ repository, config });
+    apps.push(app);
+    const token = await login(app);
+    const headers = { authorization: `Bearer ${token}` };
+
+    const enabled = await app.inject({
+      method: "PUT",
+      url: "/membership/dev-status",
+      headers,
+      payload: { active: true }
+    });
+    expect(enabled.statusCode).toBe(200);
+    expect(enabled.json()).toMatchObject({ active: true });
+
+    const disabled = await app.inject({
+      method: "PUT",
+      url: "/membership/dev-status",
+      headers,
+      payload: { active: false }
+    });
+    expect(disabled.statusCode).toBe(200);
+    expect(disabled.json()).toEqual({ active: false, expiresAt: null });
+  });
+
+  it("does not expose the debug membership switch in production", async () => {
+    const repository = new MemoryAppRepository();
+    const context = await repository.ensureIdentity("production-membership-test");
+    const token = "production-test-token";
+    await repository.createSession({
+      userId: context.userId,
+      tokenHash: sha256(token),
+      expiresAt: new Date(Date.now() + 60_000)
+    });
+    const app = await buildApp({
+      repository,
+      config: { ...config, nodeEnv: "production" }
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/membership/dev-status",
+      headers: { authorization: `Bearer ${token}` },
+      payload: { active: true }
+    });
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toMatchObject({ error: "NOT_FOUND" });
+  });
+
+  it("collects multiple learning goals and completes an isolated initial assessment", async () => {
+    const repository = new MemoryAppRepository();
+    const app = await buildApp({
+      repository,
+      config,
+      voiceResolver: async (_audio, _contentType, _config, referenceText) => ({
+        recognizedText: referenceText || "",
+        pronunciationScore: 82,
+        accuracyScore: 84,
+        fluencyScore: 80,
+        completenessScore: 100
+      })
+    });
+    apps.push(app);
+    const token = await login(app);
+    const headers = { authorization: `Bearer ${token}` };
+
+    const denied = await app.inject({
+      method: "POST",
+      url: "/assessments/initial/start",
+      headers
+    });
+    expect(denied.statusCode).toBe(403);
+
+    await app.inject({
+      method: "PUT",
+      url: "/membership/dev-status",
+      headers,
+      payload: { active: true }
+    });
+    const savedProfile = await app.inject({
+      method: "PUT",
+      url: "/onboarding/profile",
+      headers,
+      payload: {
+        ageBand: "6-7",
+        gradeLevel: "GRADE_1",
+        englishExperience: "UNDER_6_MONTHS",
+        learningGoals: ["VOCABULARY", "SPEAKING"]
+      }
+    });
+    expect(savedProfile.statusCode).toBe(200);
+    expect(savedProfile.json()).toMatchObject({
+      complete: true,
+      learningGoals: ["VOCABULARY", "SPEAKING"]
+    });
+
+    const started = await app.inject({
+      method: "POST",
+      url: "/assessments/initial/start",
+      headers
+    });
+    expect(started.statusCode).toBe(201);
+    const startedBody = started.json<{
+      assessment: { id: string };
+      questions: Array<{
+        key: string;
+        type: "CHOICE" | "TEXT" | "VOICE";
+        prompt: string;
+        options: Array<{ id: string }>;
+      }>;
+    }>();
+    expect(startedBody.questions).toHaveLength(12);
+    expect(started.json()).toMatchObject({
+      assessment: { difficulty: "FOUNDATION" }
+    });
+
+    let voiceAnswered = false;
+    const skippedQuestionTypes = new Set<string>();
+    for (const question of startedBody.questions) {
+      if (!skippedQuestionTypes.has(question.type)) {
+        const skippedResponse = await app.inject({
+          method: "POST",
+          url: `/assessments/initial/${startedBody.assessment.id}/answers`,
+          headers,
+          payload: { questionKey: question.key, skipped: true }
+        });
+        expect(skippedResponse.statusCode).toBe(200);
+        expect(skippedResponse.json()).toMatchObject({
+          result: "SKIPPED",
+          score: null
+        });
+        skippedQuestionTypes.add(question.type);
+        continue;
+      }
+      if (question.type === "VOICE" && !voiceAnswered) {
+        const boundary = "----english-start-assessment-voice";
+        const payload = Buffer.concat([
+          Buffer.from(
+            `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="answer.wav"\r\nContent-Type: audio/wav\r\n\r\n`
+          ),
+          Buffer.from("test-audio"),
+          Buffer.from(`\r\n--${boundary}--\r\n`)
+        ]);
+        const voiceResponse = await app.inject({
+          method: "POST",
+          url: `/assessments/initial/${startedBody.assessment.id}/questions/${question.key}/voice`,
+          headers: {
+            ...headers,
+            "content-type": `multipart/form-data; boundary=${boundary}`
+          },
+          payload
+        });
+        expect(voiceResponse.statusCode).toBe(201);
+        voiceAnswered = true;
+        continue;
+      }
+      const response = await app.inject({
+        method: "POST",
+        url: `/assessments/initial/${startedBody.assessment.id}/answers`,
+        headers,
+        payload: question.type === "VOICE"
+          ? { questionKey: question.key, skipped: true }
+          : {
+              questionKey: question.key,
+              answerText: question.type === "CHOICE"
+                ? question.options[0].id
+                : question.prompt
+            }
+      });
+      expect(response.statusCode).toBe(200);
+    }
+    expect(skippedQuestionTypes).toEqual(new Set(["TEXT", "CHOICE", "VOICE"]));
+
+    const completed = await app.inject({
+      method: "POST",
+      url: `/assessments/initial/${startedBody.assessment.id}/complete`,
+      headers
+    });
+    expect(completed.statusCode).toBe(200);
+    expect(completed.json()).toMatchObject({
+      status: "COMPLETED",
+      scores: { pronunciation: 82 }
+    });
+
+    const afterCompletion = await app.inject({
+      method: "GET",
+      url: "/onboarding",
+      headers
+    });
+    expect(afterCompletion.json()).toMatchObject({
+      assessmentCount: 1,
+      assessmentHistory: [
+        {
+          id: startedBody.assessment.id,
+          level: expect.any(String),
+          scores: { pronunciation: 82 }
+        }
+      ]
+    });
+
+    const repeated = await app.inject({
+      method: "POST",
+      url: "/assessments/initial/start",
+      headers
+    });
+    expect(repeated.statusCode).toBe(201);
+    expect(repeated.json()).toMatchObject({
+      assessment: { status: "IN_PROGRESS", difficulty: "FOUNDATION" }
+    });
+    expect(repeated.json<{ assessment: { id: string } }>().assessment.id)
+      .not.toBe(startedBody.assessment.id);
+
+    const report = await app.inject({ method: "GET", url: "/reports/learning", headers });
+    expect(report.statusCode).toBe(200);
+    expect(report.json()).toMatchObject({
+      totalAttempts: 0,
+      personalizedLocked: false,
+      personalized: {
+        baseline: {
+          level: expect.any(String),
+          scores: { pronunciation: 82 }
+        },
+        capabilities: expect.any(Array),
+        evidence: expect.any(Object),
+        nextStep: expect.any(String)
+      }
+    });
+  });
+
+  it("starts with a harder question set for experienced learners", async () => {
+    const repository = new MemoryAppRepository();
+    const app = await buildApp({ repository, config });
+    apps.push(app);
+    const token = await login(app);
+    const headers = { authorization: `Bearer ${token}` };
+    await app.inject({
+      method: "PUT",
+      url: "/membership/dev-status",
+      headers,
+      payload: { active: true }
+    });
+    await app.inject({
+      method: "PUT",
+      url: "/onboarding/profile",
+      headers,
+      payload: {
+        ageBand: "10-12",
+        gradeLevel: "GRADE_5",
+        englishExperience: "OVER_1_YEAR",
+        learningGoals: ["SCHOOL", "SPEAKING"]
+      }
+    });
+    const started = await app.inject({
+      method: "POST",
+      url: "/assessments/initial/start",
+      headers
+    });
+    expect(started.statusCode).toBe(201);
+    const body = started.json<{
+      assessment: { difficulty: string };
+      questions: Array<{ key: string }>;
+    }>();
+    expect(body.assessment.difficulty).toBe("ADVANCED");
+    expect(body.questions).toHaveLength(16);
+    expect(body.questions.map((question) => question.key)).toEqual(
+      expect.arrayContaining([
+        "recognition-how-many",
+        "spelling-pencil",
+        "expression-yellow-pencil"
+      ])
+    );
+    expect(body.questions.map((question) => question.key)).not.toContain("recognition-apple");
+
+    await app.inject({
+      method: "PUT",
+      url: "/onboarding/profile",
+      headers,
+      payload: {
+        ageBand: "10-12",
+        gradeLevel: "GRADE_5",
+        englishExperience: "NONE",
+        learningGoals: ["SCHOOL", "SPEAKING"]
+      }
+    });
+    const resumed = await app.inject({
+      method: "POST",
+      url: "/assessments/initial/start",
+      headers
+    });
+    expect(resumed.statusCode).toBe(200);
+    expect(resumed.json()).toMatchObject({
+      assessment: { id: expect.any(String), difficulty: "ADVANCED" },
+      questions: expect.arrayContaining([
+        expect.objectContaining({ key: "expression-yellow-pencil" })
+      ])
+    });
+  });
+
+  it("keeps the basic report visible while locking personalization for free users", async () => {
+    const app = await buildApp({ repository: new MemoryAppRepository(), config });
+    apps.push(app);
+    const token = await login(app);
+    const report = await app.inject({
+      method: "GET",
+      url: "/reports/learning",
+      headers: { authorization: `Bearer ${token}` }
+    });
+    expect(report.statusCode).toBe(200);
+    expect(report.json()).toMatchObject({
+      totalAttempts: 0,
+      personalizedLocked: true,
+      personalized: null
+    });
+    const onboarding = await app.inject({
+      method: "GET",
+      url: "/onboarding",
+      headers: { authorization: `Bearer ${token}` }
+    });
+    expect(onboarding.json()).toMatchObject({
+      membership: { active: false },
+      assessment: null
     });
   });
 
@@ -200,7 +625,7 @@ describe("English Start API", () => {
 
     const cleared = await app.inject({ method: "DELETE", url: "/words", headers });
     expect(cleared.statusCode).toBe(200);
-    expect(cleared.json()).toEqual({ removed: 50 });
+    expect(cleared.json()).toEqual({ removed: 70 });
 
     const words = await app.inject({ method: "GET", url: "/words", headers });
     expect(words.json()).toEqual({ words: [] });
@@ -212,7 +637,7 @@ describe("English Start API", () => {
     });
 
     const preview = await app.inject({ method: "GET", url: "/starter-pack", headers });
-    expect(preview.json()).toMatchObject({ name: "启蒙 50 词", count: 50 });
+    expect(preview.json()).toMatchObject({ name: "启蒙 70 词", count: 70 });
   });
 
   it("generates choice questions and records answers", async () => {
@@ -385,7 +810,9 @@ describe("English Start API", () => {
     expect(dashboardAfterPractice.json()).toMatchObject({
       checkedInToday: true,
       checkInDays: 1,
-      currentStreak: 1
+      currentStreak: 1,
+      weekCompletedDays: 1,
+      weeklyGoalDays: 5
     });
 
     const firstCheckIn = await app.inject({
@@ -398,7 +825,10 @@ describe("English Start API", () => {
       checkedInToday: true,
       firstCheckInToday: false,
       totalDays: 1,
-      currentStreak: 1
+      totalStudyDays: 1,
+      currentStreak: 1,
+      weekCompletedDays: 1,
+      weeklyGoalDays: 5
     });
 
     const repeatedCheckIn = await app.inject({
@@ -415,7 +845,7 @@ describe("English Start API", () => {
     const report = await app.inject({ method: "GET", url: "/reports/learning", headers });
     expect(report.statusCode).toBe(200);
     expect(report.json()).toMatchObject({
-      wordCount: 50,
+      wordCount: 70,
       totalCheckInDays: 1,
       currentStreak: 1,
       totalAttempts: 3,

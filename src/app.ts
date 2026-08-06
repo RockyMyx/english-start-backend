@@ -8,6 +8,7 @@ import type { AppConfig } from "./config.js";
 import type {
   ChoiceQuestion,
   DailyPlanTaskKey,
+  InitialAssessmentAnswer,
   PracticeAnswerInput,
   ReviewItemStatus,
   ReviewItemType
@@ -15,6 +16,24 @@ import type {
 import { AppError } from "./lib/errors.js";
 import type { AppRepository } from "./repositories/app-repository.js";
 import { AuthService } from "./services/auth-service.js";
+import {
+  AGE_BANDS,
+  ENGLISH_EXPERIENCES,
+  GRADE_LEVELS,
+  LEARNING_GOALS,
+  assessmentProfileComplete,
+  assessmentDifficultyForExperience,
+  assessmentQuestion,
+  assessmentQuestions,
+  assessmentReferenceText,
+  assessTextAnswer,
+  calculateAssessmentResult,
+  validateLearnerProfile
+} from "./services/initial-assessment.js";
+import {
+  redemptionCodeHash,
+  requireMembership
+} from "./services/membership-service.js";
 import { assessVoiceAnswer } from "./services/pronunciation-service.js";
 import {
   recognizeWordsFromImage,
@@ -172,6 +191,38 @@ export async function buildApp(options: BuildAppOptions) {
     return repository.getDashboard(current.context);
   });
 
+  app.get("/membership", async (request) => {
+    const current = await auth.authenticate(request.headers.authorization);
+    return repository.getMembershipStatus(current.context);
+  });
+
+  app.post("/membership/redeem", async (request) => {
+    const current = await auth.authenticate(request.headers.authorization);
+    const code = requiredText(bodyRecord(request), "code", 64);
+    const membership = await repository.redeemMembershipCode(
+      current.context,
+      redemptionCodeHash(code),
+      new Date()
+    );
+    return membership;
+  });
+
+  app.put("/membership/dev-status", async (request) => {
+    if (config.nodeEnv === "production" || !config.devLoginEnabled) {
+      throw new AppError(404, "NOT_FOUND", "接口不存在");
+    }
+    const current = await auth.authenticate(request.headers.authorization);
+    const body = bodyRecord(request);
+    if (typeof body.active !== "boolean") {
+      throw new AppError(400, "INVALID_MEMBERSHIP_STATUS", "会员测试状态不正确");
+    }
+    return repository.setDevelopmentMembership(
+      current.context,
+      body.active,
+      new Date()
+    );
+  });
+
   app.get("/profile", async (request) => {
     const current = await auth.authenticate(request.headers.authorization);
     return repository.getProfile(current.context);
@@ -184,6 +235,240 @@ export async function buildApp(options: BuildAppOptions) {
       nickname: optionalText(body, "nickname", 40),
       englishName: optionalText(body, "englishName", 40)
     });
+  });
+
+  app.get("/onboarding", async (request) => {
+    const current = await auth.authenticate(request.headers.authorization);
+    const [membership, profile, assessment, completedAssessments, assessmentCount] = await Promise.all([
+      repository.getMembershipStatus(current.context),
+      repository.getLearnerProfile(current.context),
+      repository.getLatestInitialAssessment(current.context),
+      repository.listCompletedAssessments(current.context, 10),
+      repository.countCompletedAssessments(current.context)
+    ]);
+    const difficulty = assessment?.difficulty ||
+      assessmentDifficultyForExperience(profile.englishExperience);
+    return {
+      membership,
+      profile,
+      assessment: membership.active ? assessment : null,
+      assessmentHistory: membership.active
+        ? completedAssessments.map((item) => ({
+            id: item.id,
+            difficulty: item.difficulty,
+            level: item.level,
+            scores: item.scores,
+            summary: item.summary,
+            completedAt: item.completedAt
+          }))
+        : [],
+      assessmentCount: membership.active ? assessmentCount : 0,
+      questionCount: assessmentQuestions(difficulty).length,
+      difficulty,
+      profileOptions: {
+        ageBands: AGE_BANDS,
+        gradeLevels: GRADE_LEVELS,
+        englishExperiences: ENGLISH_EXPERIENCES,
+        learningGoals: LEARNING_GOALS
+      }
+    };
+  });
+
+  app.put("/onboarding/profile", async (request) => {
+    const current = await auth.authenticate(request.headers.authorization);
+    await requireMembership(repository, current.context);
+    const body = bodyRecord(request);
+    const learningGoals = Array.isArray(body.learningGoals)
+      ? body.learningGoals.filter((goal): goal is string => typeof goal === "string")
+      : [];
+    const profileInput = {
+      ageBand: optionalText(body, "ageBand", 20),
+      gradeLevel: optionalText(body, "gradeLevel", 30),
+      englishExperience: optionalText(body, "englishExperience", 30),
+      learningGoals
+    };
+    validateLearnerProfile(profileInput);
+    return repository.updateLearnerProfile(current.context, {
+      ageBand: profileInput.ageBand,
+      gradeLevel: profileInput.gradeLevel,
+      englishExperience: profileInput.englishExperience,
+      learningGoals: profileInput.learningGoals
+    });
+  });
+
+  app.post("/assessments/initial/start", async (request, reply) => {
+    const current = await auth.authenticate(request.headers.authorization);
+    await requireMembership(repository, current.context);
+    const profile = await repository.getLearnerProfile(current.context);
+    if (!assessmentProfileComplete(profile)) {
+      throw new AppError(409, "LEARNER_PROFILE_REQUIRED", "请先完成学习者基本信息");
+    }
+    const latest = await repository.getLatestInitialAssessment(current.context);
+    const inProgress = latest?.status === "IN_PROGRESS" ? latest : null;
+    const difficulty = inProgress?.difficulty ||
+      assessmentDifficultyForExperience(profile.englishExperience);
+    const assessment = inProgress || await repository.createInitialAssessment(
+      current.context,
+      difficulty
+    );
+    return reply.status(inProgress ? 200 : 201).send({
+      assessment,
+      questions: assessmentQuestions(assessment.difficulty)
+    });
+  });
+
+  app.post<{ Params: { id: string } }>(
+    "/assessments/initial/:id/answers",
+    async (request) => {
+      const current = await auth.authenticate(request.headers.authorization);
+      await requireMembership(repository, current.context);
+      const body = bodyRecord(request);
+      const questionKey = requiredText(body, "questionKey", 80);
+      const currentAssessment = await repository.getLatestInitialAssessment(current.context);
+      if (
+        !currentAssessment ||
+        currentAssessment.id !== request.params.id ||
+        currentAssessment.status !== "IN_PROGRESS"
+      ) {
+        throw new AppError(404, "INITIAL_ASSESSMENT_NOT_FOUND", "未找到进行中的能力测评");
+      }
+      const question = assessmentQuestion(questionKey, currentAssessment.difficulty);
+      const skipped = body.skipped === true;
+      let answer: InitialAssessmentAnswer;
+      if (skipped) {
+        answer = {
+          questionKey,
+          dimension: question.dimension,
+          result: "SKIPPED",
+          answerText: null,
+          recognizedText: null,
+          score: null,
+          pronunciationScore: null,
+          accuracyScore: null,
+          fluencyScore: null,
+          completenessScore: null
+        };
+      } else {
+        const answerText = requiredText(body, "answerText", 200);
+        const result = assessTextAnswer(question, answerText);
+        answer = {
+          questionKey,
+          dimension: question.dimension,
+          result: result.correct ? "CORRECT" : "INCORRECT",
+          answerText,
+          recognizedText: null,
+          score: result.score,
+          pronunciationScore: null,
+          accuracyScore: null,
+          fluencyScore: null,
+          completenessScore: null
+        };
+      }
+      const updatedAssessment = await repository.saveInitialAssessmentAnswer(
+        current.context,
+        request.params.id,
+        answer
+      );
+      return {
+        answeredCount: updatedAssessment.answers.length,
+        result: answer.result,
+        score: answer.score
+      };
+    }
+  );
+
+  app.post<{ Params: { id: string; questionKey: string } }>(
+    "/assessments/initial/:id/questions/:questionKey/voice",
+    async (request, reply) => {
+      const current = await auth.authenticate(request.headers.authorization);
+      await requireMembership(repository, current.context);
+      const currentAssessment = await repository.getLatestInitialAssessment(current.context);
+      if (
+        !currentAssessment ||
+        currentAssessment.id !== request.params.id ||
+        currentAssessment.status !== "IN_PROGRESS"
+      ) {
+        throw new AppError(404, "INITIAL_ASSESSMENT_NOT_FOUND", "未找到进行中的能力测评");
+      }
+      const referenceText = assessmentReferenceText(
+        request.params.questionKey,
+        currentAssessment.difficulty
+      );
+      const question = assessmentQuestion(
+        request.params.questionKey,
+        currentAssessment.difficulty
+      );
+      const upload = await request.file();
+      if (!upload) throw new AppError(400, "AUDIO_REQUIRED", "请上传录音");
+      const audio = await upload.toBuffer();
+      const voice = await (options.voiceResolver || assessVoiceAnswer)(
+        audio,
+        upload.mimetype,
+        config,
+        referenceText
+      );
+      const recognizedCorrect = normalizeEnglish(voice.recognizedText) === normalizeEnglish(referenceText);
+      const correct = recognizedCorrect && voice.pronunciationScore >= 60;
+      const updatedAssessment = await repository.saveInitialAssessmentAnswer(
+        current.context,
+        request.params.id,
+        {
+          questionKey: request.params.questionKey,
+          dimension: question.dimension,
+          result: correct ? "CORRECT" : "INCORRECT",
+          answerText: null,
+          recognizedText: voice.recognizedText,
+          score: voice.pronunciationScore,
+          pronunciationScore: voice.pronunciationScore,
+          accuracyScore: voice.accuracyScore,
+          fluencyScore: voice.fluencyScore,
+          completenessScore: voice.completenessScore
+        }
+      );
+      return reply.status(201).send({
+        answeredCount: updatedAssessment.answers.length,
+        correct,
+        voice
+      });
+    }
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/assessments/initial/:id/complete",
+    async (request) => {
+      const current = await auth.authenticate(request.headers.authorization);
+      await requireMembership(repository, current.context);
+      const [assessment, profile] = await Promise.all([
+        repository.getLatestInitialAssessment(current.context),
+        repository.getLearnerProfile(current.context)
+      ]);
+      if (!assessment || assessment.id !== request.params.id || assessment.status !== "IN_PROGRESS") {
+        throw new AppError(404, "INITIAL_ASSESSMENT_NOT_FOUND", "未找到进行中的能力测评");
+      }
+      if (assessment.answers.length !== assessmentQuestions(assessment.difficulty).length) {
+        throw new AppError(409, "ASSESSMENT_INCOMPLETE", "还有测评题目未完成");
+      }
+      const result = calculateAssessmentResult(
+        assessment.answers,
+        profile.learningGoals,
+        assessment.difficulty
+      );
+      return repository.completeInitialAssessment(
+        current.context,
+        assessment.id,
+        result,
+        new Date()
+      );
+    }
+  );
+
+  app.delete("/assessments/initial/dev-reset", async (request) => {
+    if (config.nodeEnv === "production" || !config.devLoginEnabled) {
+      throw new AppError(404, "NOT_FOUND", "接口不存在");
+    }
+    const current = await auth.authenticate(request.headers.authorization);
+    await repository.resetInitialAssessment(current.context);
+    return { reset: true };
   });
 
   app.post("/profile/avatar", async (request, reply) => {
@@ -216,6 +501,23 @@ export async function buildApp(options: BuildAppOptions) {
         dailyScoreGoal
       )
     };
+  });
+
+  app.put("/me/goals", async (request) => {
+    const current = await auth.authenticate(request.headers.authorization);
+    const body = bodyRecord(request);
+    const dailyScoreGoal = Number(body.dailyScoreGoal);
+    const weeklyGoalDays = Number(body.weeklyGoalDays);
+    if (!Number.isInteger(dailyScoreGoal) || dailyScoreGoal < 1 || dailyScoreGoal > 999) {
+      throw new AppError(400, "INVALID_DAILY_SCORE_GOAL", "每日达标分数必须是 1-999 的整数");
+    }
+    if (!Number.isInteger(weeklyGoalDays) || weeklyGoalDays < 1 || weeklyGoalDays > 7) {
+      throw new AppError(400, "INVALID_WEEKLY_GOAL_DAYS", "每周达标天数必须是 1-7 的整数");
+    }
+    return repository.updateLearningGoals(current.context, {
+      dailyScoreGoal,
+      weeklyGoalDays
+    });
   });
 
   app.post("/check-ins/today", async (request, reply) => {
@@ -276,7 +578,7 @@ export async function buildApp(options: BuildAppOptions) {
   app.get("/starter-pack", async (request) => {
     await auth.authenticate(request.headers.authorization);
     const words = await repository.listStarterWords();
-    return { name: "启蒙 50 词", count: words.length, words };
+    return { name: `启蒙 ${words.length} 词`, count: words.length, words };
   });
 
   app.post("/starter-pack/import", async (request, reply) => {
@@ -292,6 +594,7 @@ export async function buildApp(options: BuildAppOptions) {
 
   app.post("/words", async (request, reply) => {
     const current = await auth.authenticate(request.headers.authorization);
+    await requireMembership(repository, current.context);
     const body = bodyRecord(request);
     const word = await repository.addWord(current.context, {
       english: requiredText(body, "english", 80),
@@ -303,6 +606,7 @@ export async function buildApp(options: BuildAppOptions) {
 
   app.post("/words/batch", async (request, reply) => {
     const current = await auth.authenticate(request.headers.authorization);
+    await requireMembership(repository, current.context);
     const body = bodyRecord(request);
     if (!Array.isArray(body.words) || !body.words.length || body.words.length > 50) {
       throw new AppError(400, "INVALID_WORD_BATCH", "每次需要确认 1-50 个单词");
@@ -323,6 +627,7 @@ export async function buildApp(options: BuildAppOptions) {
 
   app.post("/words/recognize-image", async (request, reply) => {
     const current = await auth.authenticate(request.headers.authorization);
+    await requireMembership(repository, current.context);
     const upload = await request.file();
     if (!upload) throw new AppError(400, "IMAGE_REQUIRED", "请拍摄或选择一张图片");
     if (!["image/jpeg", "image/png", "image/webp"].includes(upload.mimetype)) {
