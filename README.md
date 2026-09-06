@@ -1,6 +1,6 @@
 # English Start Backend
 
-“单词练练”微信小程序的统一后端，负责身份与会话、兑换码会员、个人词库、启蒙
+“单词练练”微信小程序的统一后端，负责身份与会话、虚拟支付会员、个人词库、启蒙
 内容、练习出题与计分、学习记录、AI 语义判断、语音合成、语音转写和发音评测。
 
 ## 技术栈
@@ -33,6 +33,24 @@ GET http://localhost:3000/health
 初始化命令会写入启蒙词、造句题和对话题；重复执行 seed 使用 upsert，不会重复创建
 同一份共享内容。
 
+## 服务器一键更新
+
+服务器首次放置好 `.env` 后，可以通过一个脚本完成数据库备份、镜像构建、类型检查、
+测试、Prisma migration、seed、API 更新和健康检查：
+
+```bash
+bash deploy.sh
+```
+
+如果服务器目录是 Git 仓库，还可以同时拉取最新代码：
+
+```bash
+bash deploy.sh --pull
+```
+
+CentOS 7 会自动加载 `docker-compose.centos7.yml` 中的 PostgreSQL seccomp 兼容配置。
+完整的首次部署、环境变量和故障处理见 `DEPLOY_CENTOS7.md`。
+
 ## 环境变量
 
 `.env.example` 提供了本地模板。`.env` 包含凭证，不应提交到仓库。
@@ -59,11 +77,30 @@ GET http://localhost:3000/health
 开发模式可以调用 `/auth/dev-login`。当 `NODE_ENV=production` 时，该接口始终不可用，
 不受 `DEV_LOGIN_ENABLED` 的值影响。正式登录需要同时配置微信 AppID 和 AppSecret。
 
-### 兑换码会员
+### 虚拟支付会员
 
 启蒙 70 词对免费用户开放；新增单个单词、图片识别和
 批量加入单词需要有效会员。会员过期不会删除已经加入的个人词汇。
 
+年度会员默认价格为 9900 分、有效期 365 天，均通过环境变量配置。小程序使用
+`wx.requestVirtualPayment` 的道具直购模式，后端负责生成支付签名、查询支付状态，并在收到
+`xpay_goods_deliver_notify` 后幂等发放会员。前端支付成功不会直接修改会员状态。
+
+| 变量 | 说明 |
+| --- | --- |
+| `WECHAT_MESSAGE_TOKEN` | 微信消息推送 Token，回调使用明文模式 |
+| `WECHAT_VIRTUAL_PAYMENT_OFFER_ID` | 虚拟支付基础配置中的 OfferId |
+| `WECHAT_VIRTUAL_PAYMENT_APP_KEY` | 与支付环境匹配的沙箱或现网 AppKey |
+| `WECHAT_VIRTUAL_PAYMENT_PRODUCT_ID` | 已上传、审核并发布的会员道具 ID |
+| `WECHAT_VIRTUAL_PAYMENT_ENV` | `0` 正式、`1` 沙箱；正式版必须为 `0` |
+| `MEMBERSHIP_PRICE_FEN` | 会员售价，单位分，默认 `9900` |
+| `MEMBERSHIP_DURATION_DAYS` | 会员有效天数，默认 `365` |
+
+修改价格时，必须同时修改微信虚拟支付后台对应道具的价格并重新发布，否则微信会拒绝下单。
+消息推送 URL 配置为 `https://你的API域名/wechat/xpay-callback`，数据格式可使用 JSON 或 XML，
+消息加解密方式使用明文模式。
+
+兑换码接口和生成工具暂时保留为运营应急能力，但小程序会员中心不再展示兑换入口。
 开发兑换码使用本地命令生成，数据库只保存兑换码哈希：
 
 ```powershell
@@ -152,7 +189,10 @@ Authorization: Bearer <token>
 | `POST` | `/auth/dev-login` | 开发模拟登录 |
 | `POST` | `/auth/wechat` | 使用微信 code 登录 |
 | `GET` | `/me` | 首页统计、词库数量和模块开放状态 |
-| `GET` | `/membership` | 查询会员状态和到期时间 |
+| `GET` | `/membership` | 查询会员状态、到期时间和会员商品配置 |
+| `POST` | `/membership/payment/orders` | 创建会员虚拟支付订单并返回签名参数 |
+| `POST` | `/membership/payment/orders/:outTradeNo/confirm` | 服务端查询并确认支付结果 |
+| `GET`、`POST` | `/wechat/xpay-callback` | 微信消息验证与虚拟支付发货回调 |
 | `POST` | `/membership/redeem` | 使用一次性兑换码开通会员 |
 | `GET` | `/onboarding` | 查询学习资料、当前测评和历史结果 |
 | `PUT` | `/onboarding/profile` | 保存学习资料和多选学习目标（会员） |
@@ -183,6 +223,7 @@ Authorization: Bearer <token>
 
 - `User`：一个微信 OpenID 对应一个学习用户，并保存每日目标、会员到期时间和学习资料。
 - `MembershipRedemptionCode`：只保存哈希的一次性会员兑换码。
+- `MembershipPaymentOrder`：虚拟支付会员订单及幂等发放状态。
 - `InitialAssessment`、`InitialAssessmentAnswer`：可重复能力测评和独立答题记录。
 - `Session`：保存哈希后的会话令牌及过期时间。
 - `StarterVocabulary`：全局共享的启蒙词内容。

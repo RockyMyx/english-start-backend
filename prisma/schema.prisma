@@ -52,6 +52,7 @@ model User {
   reviewItemStates ReviewItemState[]
   dailyPlans      DailyPlan[]
   redeemedMembershipCodes MembershipRedemptionCode[]
+  membershipPaymentOrders MembershipPaymentOrder[]
   initialAssessments InitialAssessment[]
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
@@ -108,6 +109,26 @@ model MembershipRedemptionCode {
 
   @@index([redeemedByUserId, redeemedAt])
   @@index([expiresAt])
+}
+
+model MembershipPaymentOrder {
+  id            String   @id @default(uuid())
+  outTradeNo    String   @unique
+  userId        String
+  productId     String
+  amountFen     Int
+  durationDays  Int
+  env           Int
+  status        String   @default("PENDING")
+  transactionId String?
+  paidAt        DateTime?
+  deliveredAt   DateTime?
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
 }
 
 model DailyCheckIn {

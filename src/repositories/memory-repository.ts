@@ -18,6 +18,7 @@ import type {
   LearningReport,
   LearningGoals,
   LearningReportMode,
+  MembershipPaymentOrderRecord,
   MembershipStatus,
   ReviewItemStatus,
   ReviewItemType,
@@ -209,6 +210,7 @@ export class MemoryAppRepository implements AppRepository {
     redeemedAt: Date | null;
     redeemedByUserId: string | null;
   }> = [];
+  private membershipPaymentOrders: MembershipPaymentOrderRecord[] = [];
 
   async ensureIdentity(openId: string): Promise<IdentityContext> {
     let user = this.users.find((item) => item.openId === openId);
@@ -262,6 +264,77 @@ export class MemoryAppRepository implements AppRepository {
   async getMembershipStatus(context: IdentityContext): Promise<MembershipStatus> {
     const expiresAt = this.user(context).membershipExpiresAt;
     return { active: !!expiresAt && expiresAt > new Date(), expiresAt };
+  }
+
+  async getWechatOpenId(context: IdentityContext): Promise<string> {
+    return this.user(context).openId;
+  }
+
+  async createMembershipPaymentOrder(
+    context: IdentityContext,
+    input: Omit<
+      MembershipPaymentOrderRecord,
+      "userId" | "status" | "transactionId" | "paidAt" | "deliveredAt"
+    >
+  ): Promise<MembershipPaymentOrderRecord> {
+    const order: MembershipPaymentOrderRecord = {
+      ...input,
+      userId: context.userId,
+      status: "PENDING",
+      transactionId: null,
+      paidAt: null,
+      deliveredAt: null
+    };
+    this.membershipPaymentOrders.push(order);
+    return order;
+  }
+
+  async getMembershipPaymentOrder(
+    context: IdentityContext,
+    outTradeNo: string
+  ): Promise<MembershipPaymentOrderRecord | null> {
+    return this.membershipPaymentOrders.find(
+      (item) => item.userId === context.userId && item.outTradeNo === outTradeNo
+    ) || null;
+  }
+
+  async fulfillMembershipPaymentOrder(input: {
+    outTradeNo: string;
+    openId: string;
+    productId: string;
+    amountFen: number;
+    env: 0 | 1;
+    transactionId: string | null;
+    paidAt: Date;
+  }): Promise<MembershipStatus> {
+    const order = this.membershipPaymentOrders.find(
+      (item) => item.outTradeNo === input.outTradeNo
+    );
+    const user = this.users.find((item) => item.openId === input.openId);
+    if (!order || !user || order.userId !== user.id) {
+      throw new AppError(404, "MEMBERSHIP_ORDER_NOT_FOUND", "会员支付订单不存在");
+    }
+    if (
+      order.productId !== input.productId ||
+      order.amountFen !== input.amountFen ||
+      order.env !== input.env
+    ) {
+      throw new AppError(409, "MEMBERSHIP_ORDER_MISMATCH", "会员支付订单信息不一致");
+    }
+    if (order.status === "DELIVERED") {
+      return this.getMembershipStatus({ userId: user.id });
+    }
+    const startsAt = user.membershipExpiresAt && user.membershipExpiresAt > input.paidAt
+      ? user.membershipExpiresAt
+      : input.paidAt;
+    user.membershipExpiresAt = new Date(
+      startsAt.getTime() + order.durationDays * 86_400_000
+    );
+    order.status = "DELIVERED";
+    order.transactionId = input.transactionId;
+    order.paidAt = input.paidAt;
+    order.deliveredAt = new Date();
+    return { active: true, expiresAt: user.membershipExpiresAt };
   }
 
   async setDevelopmentMembership(

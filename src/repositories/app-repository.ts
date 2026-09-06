@@ -12,6 +12,7 @@ import type {
   LearnerProfile,
   LearningReport,
   LearningGoals,
+  MembershipPaymentOrderRecord,
   MembershipStatus,
   ReviewItemStatus,
   ReviewItemType,
@@ -38,6 +39,24 @@ export interface AppRepository {
   getSessionByTokenHash(tokenHash: string): Promise<SessionRecord | null>;
   getContext(userId: string): Promise<IdentityContext>;
   getMembershipStatus(context: IdentityContext): Promise<MembershipStatus>;
+  getWechatOpenId(context: IdentityContext): Promise<string>;
+  createMembershipPaymentOrder(
+    context: IdentityContext,
+    input: Omit<MembershipPaymentOrderRecord, "userId" | "status" | "transactionId" | "paidAt" | "deliveredAt">
+  ): Promise<MembershipPaymentOrderRecord>;
+  getMembershipPaymentOrder(
+    context: IdentityContext,
+    outTradeNo: string
+  ): Promise<MembershipPaymentOrderRecord | null>;
+  fulfillMembershipPaymentOrder(input: {
+    outTradeNo: string;
+    openId: string;
+    productId: string;
+    amountFen: number;
+    env: 0 | 1;
+    transactionId: string | null;
+    paidAt: Date;
+  }): Promise<MembershipStatus>;
   setDevelopmentMembership(
     context: IdentityContext,
     active: boolean,

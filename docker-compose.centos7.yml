@@ -1,0 +1,4 @@
+services:
+  postgres:
+    security_opt:
+      - seccomp:unconfined

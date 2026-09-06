@@ -19,6 +19,7 @@ import type {
   LearningReport,
   LearningGoals,
   LearningReportMode,
+  MembershipPaymentOrderRecord,
   MembershipStatus,
   ReviewItemStatus,
   ReviewItemType,
@@ -72,6 +73,28 @@ function membershipStatus(expiresAt: Date | null, now = new Date()): MembershipS
   return {
     active: !!expiresAt && expiresAt.getTime() > now.getTime(),
     expiresAt
+  };
+}
+
+function membershipPaymentOrder(row: {
+  outTradeNo: string;
+  userId: string;
+  productId: string;
+  amountFen: number;
+  durationDays: number;
+  env: number;
+  status: string;
+  transactionId: string | null;
+  paidAt: Date | null;
+  deliveredAt: Date | null;
+}): MembershipPaymentOrderRecord {
+  if ((row.env !== 0 && row.env !== 1) || (row.status !== "PENDING" && row.status !== "DELIVERED")) {
+    throw new AppError(500, "INVALID_MEMBERSHIP_ORDER", "会员支付订单状态异常");
+  }
+  return {
+    ...row,
+    env: row.env,
+    status: row.status
   };
 }
 
@@ -167,6 +190,93 @@ export class PrismaAppRepository implements AppRepository {
       select: { membershipExpiresAt: true }
     });
     return membershipStatus(user.membershipExpiresAt);
+  }
+
+  async getWechatOpenId(context: IdentityContext): Promise<string> {
+    const user = await this.client.user.findUniqueOrThrow({
+      where: { id: context.userId },
+      select: { wechatOpenId: true }
+    });
+    return user.wechatOpenId;
+  }
+
+  async createMembershipPaymentOrder(
+    context: IdentityContext,
+    input: Omit<
+      MembershipPaymentOrderRecord,
+      "userId" | "status" | "transactionId" | "paidAt" | "deliveredAt"
+    >
+  ): Promise<MembershipPaymentOrderRecord> {
+    const order = await this.client.membershipPaymentOrder.create({
+      data: { ...input, userId: context.userId }
+    });
+    return membershipPaymentOrder(order);
+  }
+
+  async getMembershipPaymentOrder(
+    context: IdentityContext,
+    outTradeNo: string
+  ): Promise<MembershipPaymentOrderRecord | null> {
+    const order = await this.client.membershipPaymentOrder.findFirst({
+      where: { userId: context.userId, outTradeNo }
+    });
+    return order ? membershipPaymentOrder(order) : null;
+  }
+
+  async fulfillMembershipPaymentOrder(input: {
+    outTradeNo: string;
+    openId: string;
+    productId: string;
+    amountFen: number;
+    env: 0 | 1;
+    transactionId: string | null;
+    paidAt: Date;
+  }): Promise<MembershipStatus> {
+    return this.client.$transaction(async (tx) => {
+      const order = await tx.membershipPaymentOrder.findUnique({
+        where: { outTradeNo: input.outTradeNo },
+        include: { user: { select: { wechatOpenId: true, membershipExpiresAt: true } } }
+      });
+      if (!order || order.user.wechatOpenId !== input.openId) {
+        throw new AppError(404, "MEMBERSHIP_ORDER_NOT_FOUND", "会员支付订单不存在");
+      }
+      if (
+        order.productId !== input.productId ||
+        order.amountFen !== input.amountFen ||
+        order.env !== input.env
+      ) {
+        throw new AppError(409, "MEMBERSHIP_ORDER_MISMATCH", "会员支付订单信息不一致");
+      }
+      if (order.status === "DELIVERED") {
+        return membershipStatus(order.user.membershipExpiresAt, input.paidAt);
+      }
+      const delivered = await tx.membershipPaymentOrder.updateMany({
+        where: { id: order.id, status: "PENDING" },
+        data: {
+          status: "DELIVERED",
+          transactionId: input.transactionId,
+          paidAt: input.paidAt,
+          deliveredAt: new Date()
+        }
+      });
+      if (delivered.count !== 1) {
+        const current = await tx.user.findUniqueOrThrow({
+          where: { id: order.userId },
+          select: { membershipExpiresAt: true }
+        });
+        return membershipStatus(current.membershipExpiresAt, input.paidAt);
+      }
+      const startsAt =
+        order.user.membershipExpiresAt && order.user.membershipExpiresAt > input.paidAt
+          ? order.user.membershipExpiresAt
+          : input.paidAt;
+      const expiresAt = new Date(startsAt.getTime() + order.durationDays * 86_400_000);
+      await tx.user.update({
+        where: { id: order.userId },
+        data: { membershipExpiresAt: expiresAt }
+      });
+      return { active: true, expiresAt };
+    });
   }
 
   async setDevelopmentMembership(

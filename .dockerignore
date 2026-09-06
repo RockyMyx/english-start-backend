@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+.backups
+coverage
+dist
+logs
+node_modules
+storage
+*.log
+DEPLOY_CENTOS7.md

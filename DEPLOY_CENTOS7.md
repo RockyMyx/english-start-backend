@@ -3,7 +3,7 @@
 > 适用项目：`english-start-backend`
 >
 > 部署环境：CentOS 7、Docker、Docker Compose
-> 最后更新：2026-07-28
+> 最后更新：2026-08-06
 
 ## 1. 使用范围
 
@@ -21,6 +21,40 @@
 
 CentOS 7 已停止常规维护，无法直接可靠运行新版 Node.js 官方宿主机二进制。本文不升级
 宿主系统，而是把 Node.js、Prisma 和 PostgreSQL 全部放入容器中运行。
+
+## 一键更新（推荐）
+
+完成一次初始配置后，后续不再需要手工执行安装依赖、编译、migration 和重建容器等
+长命令。
+
+如果代码已经上传到服务器：
+
+```bash
+bash deploy.sh
+```
+
+如果服务器目录是 Git 仓库，需要同时拉取远端最新代码：
+
+```bash
+bash deploy.sh --pull
+```
+
+脚本自动完成：
+
+1. 检查 Docker、Compose 和 `.env`。
+2. 在 CentOS 7 上自动加载 seccomp 兼容配置。
+3. 启动并等待 PostgreSQL 健康。
+4. 备份数据库到 `.backups/`。
+5. 构建隔离的 API 镜像，并在镜像中运行类型检查、测试和编译。
+6. 应用 Prisma migration 和 seed。
+7. 将旧 API 切换为新镜像。
+8. 等待健康检查并输出最终状态。
+
+如果 Docker Hub 不可访问，脚本会自动切换到国内镜像代理重试。构建或 migration 失败时
+不会主动删除数据库卷。
+
+第一次改用一键部署时，脚本会识别并移除以前通过 `docker run` 创建的旧 API 容器，之后
+API 和 PostgreSQL 都由 Compose 管理。
 
 ## 2. 当前架构
 
@@ -41,12 +75,13 @@ PostgreSQL 17
 Docker 命名数据卷
 ```
 
-当前仓库的 `docker-compose.yml` 只定义 PostgreSQL，不包含 API 服务。因此：
+当前仓库的 `docker-compose.yml` 统一定义 PostgreSQL、migration 任务和 API。因此：
 
 - PostgreSQL 使用 `docker compose` 管理。
-- Node 依赖安装、Prisma 和编译使用临时 Node 容器。
-- API 使用独立的 `english-start-api` 容器运行。
-- `dist`、`node_modules` 和头像保存在服务器项目目录。
+- Node 依赖安装、类型检查、测试和编译在 Docker 镜像构建阶段完成。
+- migration 和 seed 通过一次性 Compose 任务执行。
+- API 使用构建完成的 `english-start-backend:local` 镜像运行。
+- 头像通过宿主机 `storage/avatars` 目录持久化。
 - PostgreSQL 数据保存在 Docker 命名卷。
 
 ## 3. 固定名称和目录
@@ -267,6 +302,25 @@ AZURE_TTS_KEY=通过安全方式填写
 AZURE_TTS_REGION=通过安全方式填写
 AZURE_SPEECH_VOICE=en-US-JennyNeural
 ```
+
+如果启用会员虚拟支付：
+
+```dotenv
+WECHAT_APP_ID=正式小程序AppID
+WECHAT_APP_SECRET=通过安全方式填写
+WECHAT_MESSAGE_TOKEN=微信消息推送Token
+WECHAT_VIRTUAL_PAYMENT_OFFER_ID=虚拟支付OfferId
+WECHAT_VIRTUAL_PAYMENT_APP_KEY=与环境匹配的AppKey
+WECHAT_VIRTUAL_PAYMENT_PRODUCT_ID=已发布的会员道具ID
+WECHAT_VIRTUAL_PAYMENT_ENV=0
+MEMBERSHIP_PRICE_FEN=9900
+MEMBERSHIP_DURATION_DAYS=365
+```
+
+在小程序后台把消息推送 URL 设置为
+`https://API_DOMAIN/wechat/xpay-callback`，Token 必须与 `WECHAT_MESSAGE_TOKEN` 一致，使用明文模式。
+正式版必须使用现网 AppKey 和 `WECHAT_VIRTUAL_PAYMENT_ENV=0`。修改会员价格时，还需同步修改并
+重新发布虚拟支付后台的会员道具价格。
 
 注意：
 

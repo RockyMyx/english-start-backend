@@ -7,6 +7,13 @@ export interface AppConfig {
   sessionTtlDays: number;
   wechatAppId: string;
   wechatAppSecret: string;
+  wechatMessageToken: string;
+  wechatVirtualPaymentOfferId: string;
+  wechatVirtualPaymentAppKey: string;
+  wechatVirtualPaymentProductId: string;
+  wechatVirtualPaymentEnv: 0 | 1;
+  membershipPriceFen: number;
+  membershipDurationDays: number;
   azureTtsEndpoint: string;
   azureSpeechKey: string;
   azureSpeechRegion: string;
@@ -30,6 +37,10 @@ function positiveNumber(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function positiveInteger(value: string | undefined, fallback: number): number {
+  return Math.floor(positiveNumber(value, fallback));
+}
+
 export function loadConfig(): AppConfig {
   const requestedEvaluator = process.env.AI_EVALUATION_PROVIDER;
   const aiEvaluationProvider =
@@ -48,6 +59,13 @@ export function loadConfig(): AppConfig {
     sessionTtlDays: positiveNumber(process.env.SESSION_TTL_DAYS, 30),
     wechatAppId: process.env.WECHAT_APP_ID || "",
     wechatAppSecret: process.env.WECHAT_APP_SECRET || "",
+    wechatMessageToken: process.env.WECHAT_MESSAGE_TOKEN || "",
+    wechatVirtualPaymentOfferId: process.env.WECHAT_VIRTUAL_PAYMENT_OFFER_ID || "",
+    wechatVirtualPaymentAppKey: process.env.WECHAT_VIRTUAL_PAYMENT_APP_KEY || "",
+    wechatVirtualPaymentProductId: process.env.WECHAT_VIRTUAL_PAYMENT_PRODUCT_ID || "",
+    wechatVirtualPaymentEnv: process.env.WECHAT_VIRTUAL_PAYMENT_ENV === "1" ? 1 : 0,
+    membershipPriceFen: positiveInteger(process.env.MEMBERSHIP_PRICE_FEN, 9900),
+    membershipDurationDays: positiveInteger(process.env.MEMBERSHIP_DURATION_DAYS, 365),
     azureTtsEndpoint: process.env.AZURE_TTS_ENDPOINT || "",
     azureSpeechKey: process.env.AZURE_TTS_KEY || "",
     azureSpeechRegion: process.env.AZURE_TTS_REGION || "",

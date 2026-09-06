@@ -34,6 +34,16 @@ import {
   redemptionCodeHash,
   requireMembership
 } from "./services/membership-service.js";
+import {
+  createMembershipTradeNo,
+  createVirtualPaymentParameters,
+  membershipProduct,
+  parseGoodsDeliveryNotification,
+  queryVirtualPaymentOrder,
+  requireVirtualPayment,
+  verifyWechatMessageSignature,
+  type VirtualPaymentQueryResult
+} from "./services/virtual-payment-service.js";
 import { assessVoiceAnswer } from "./services/pronunciation-service.js";
 import {
   recognizeWordsFromImage,
@@ -41,12 +51,20 @@ import {
 } from "./services/image-word-recognizer.js";
 import { evaluateSemanticAnswer } from "./services/semantic-evaluator.js";
 import { synthesizeSpeech, type SpeechKind } from "./services/speech-service.js";
-import { resolveWechatOpenId } from "./services/wechat-service.js";
+import {
+  resolveWechatSession,
+  type WechatSession
+} from "./services/wechat-service.js";
 
 interface BuildAppOptions {
   repository: AppRepository;
   config: AppConfig;
-  wechatResolver?: (code: string, config: AppConfig) => Promise<string>;
+  wechatResolver?: (code: string, config: AppConfig) => Promise<WechatSession>;
+  virtualPaymentQueryResolver?: (
+    config: AppConfig,
+    openId: string,
+    outTradeNo: string
+  ) => Promise<VirtualPaymentQueryResult>;
   speechResolver?: typeof synthesizeSpeech;
   semanticResolver?: typeof evaluateSemanticAnswer;
   voiceResolver?: typeof assessVoiceAnswer;
@@ -125,6 +143,11 @@ export async function buildApp(options: BuildAppOptions) {
   await app.register(multipart, {
     limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 2 }
   });
+  app.addContentTypeParser(
+    ["text/xml", "application/xml"],
+    { parseAs: "string" },
+    (_request, body, done) => done(null, body)
+  );
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof AppError) {
@@ -182,8 +205,8 @@ export async function buildApp(options: BuildAppOptions) {
 
   app.post("/auth/wechat", async (request) => {
     const code = requiredText(bodyRecord(request), "code", 256);
-    const openId = await (options.wechatResolver || resolveWechatOpenId)(code, config);
-    return auth.loginWithOpenId(openId);
+    const session = await (options.wechatResolver || resolveWechatSession)(code, config);
+    return auth.loginWithOpenId(session.openId);
   });
 
   app.get("/me", async (request) => {
@@ -193,8 +216,81 @@ export async function buildApp(options: BuildAppOptions) {
 
   app.get("/membership", async (request) => {
     const current = await auth.authenticate(request.headers.authorization);
-    return repository.getMembershipStatus(current.context);
+    return {
+      ...await repository.getMembershipStatus(current.context),
+      product: membershipProduct(config)
+    };
   });
+
+  app.post("/membership/payment/orders", async (request, reply) => {
+    const current = await auth.authenticate(request.headers.authorization);
+    requireVirtualPayment(config);
+    const code = requiredText(bodyRecord(request), "code", 256);
+    const wechatSession = await (options.wechatResolver || resolveWechatSession)(code, config);
+    const expectedOpenId = await repository.getWechatOpenId(current.context);
+    if (wechatSession.openId !== expectedOpenId) {
+      throw new AppError(403, "WECHAT_IDENTITY_MISMATCH", "微信身份与当前登录用户不一致，请重新登录");
+    }
+    const order = await repository.createMembershipPaymentOrder(current.context, {
+      outTradeNo: createMembershipTradeNo(),
+      productId: config.wechatVirtualPaymentProductId,
+      amountFen: config.membershipPriceFen,
+      durationDays: config.membershipDurationDays,
+      env: config.wechatVirtualPaymentEnv
+    });
+    return reply.status(201).send({
+      payment: createVirtualPaymentParameters(config, order, wechatSession.sessionKey),
+      product: membershipProduct(config)
+    });
+  });
+
+  app.post<{ Params: { outTradeNo: string } }>(
+    "/membership/payment/orders/:outTradeNo/confirm",
+    async (request) => {
+      const current = await auth.authenticate(request.headers.authorization);
+      requireVirtualPayment(config);
+      const order = await repository.getMembershipPaymentOrder(
+        current.context,
+        request.params.outTradeNo
+      );
+      if (!order) {
+        throw new AppError(404, "MEMBERSHIP_ORDER_NOT_FOUND", "会员支付订单不存在");
+      }
+      if (order.status === "DELIVERED") {
+        return {
+          status: "DELIVERED",
+          membership: await repository.getMembershipStatus(current.context)
+        };
+      }
+      const openId = await repository.getWechatOpenId(current.context);
+      const payment = await (options.virtualPaymentQueryResolver || queryVirtualPaymentOrder)(
+        config,
+        openId,
+        order.outTradeNo
+      );
+      if ([2, 3, 4].includes(payment.status)) {
+        if (payment.paidFee !== order.amountFen) {
+          throw new AppError(409, "MEMBERSHIP_PAYMENT_AMOUNT_MISMATCH", "会员支付金额不正确");
+        }
+        const membership = await repository.fulfillMembershipPaymentOrder({
+          outTradeNo: order.outTradeNo,
+          openId,
+          productId: order.productId,
+          amountFen: payment.paidFee,
+          env: order.env,
+          transactionId: payment.transactionId,
+          paidAt: payment.paidAt || new Date()
+        });
+        return { status: "DELIVERED", membership };
+      }
+      return {
+        status: payment.status === 5 || payment.status === 6 || payment.status === 8
+          ? "CLOSED"
+          : "PENDING",
+        membership: await repository.getMembershipStatus(current.context)
+      };
+    }
+  );
 
   app.post("/membership/redeem", async (request) => {
     const current = await auth.authenticate(request.headers.authorization);
@@ -221,6 +317,46 @@ export async function buildApp(options: BuildAppOptions) {
       body.active,
       new Date()
     );
+  });
+
+  app.get<{
+    Querystring: { signature?: string; timestamp?: string; nonce?: string; echostr?: string };
+  }>("/wechat/xpay-callback", async (request, reply) => {
+    const { signature = "", timestamp = "", nonce = "", echostr = "" } = request.query;
+    if (!verifyWechatMessageSignature(config.wechatMessageToken, timestamp, nonce, signature)) {
+      throw new AppError(403, "INVALID_WECHAT_SIGNATURE", "微信消息签名无效");
+    }
+    return reply.type("text/plain").send(echostr);
+  });
+
+  app.post<{
+    Querystring: { signature?: string; timestamp?: string; nonce?: string };
+  }>("/wechat/xpay-callback", async (request, reply) => {
+    const { signature = "", timestamp = "", nonce = "" } = request.query;
+    if (!verifyWechatMessageSignature(config.wechatMessageToken, timestamp, nonce, signature)) {
+      throw new AppError(403, "INVALID_WECHAT_SIGNATURE", "微信消息签名无效");
+    }
+    const xml = typeof request.body === "string";
+    try {
+      const event = parseGoodsDeliveryNotification(request.body);
+      await repository.fulfillMembershipPaymentOrder({
+        outTradeNo: event.outTradeNo,
+        openId: event.openId,
+        productId: event.productId,
+        amountFen: event.actualPrice,
+        env: event.env,
+        transactionId: event.transactionId,
+        paidAt: event.paidAt
+      });
+      return xml
+        ? reply.type("application/xml").send("<xml><ErrCode>0</ErrCode><ErrMsg><![CDATA[success]]></ErrMsg></xml>")
+        : reply.send({ ErrCode: 0, ErrMsg: "success" });
+    } catch (error) {
+      request.log.error({ err: error }, "virtual payment delivery failed");
+      return xml
+        ? reply.type("application/xml").send("<xml><ErrCode>1</ErrCode><ErrMsg><![CDATA[delivery failed]]></ErrMsg></xml>")
+        : reply.send({ ErrCode: 1, ErrMsg: "delivery failed" });
+    }
   });
 
   app.get("/profile", async (request) => {

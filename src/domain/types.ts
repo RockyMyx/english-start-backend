@@ -20,6 +20,21 @@ export interface MembershipStatus {
   expiresAt: Date | null;
 }
 
+export type MembershipPaymentStatus = "PENDING" | "DELIVERED";
+
+export interface MembershipPaymentOrderRecord {
+  outTradeNo: string;
+  userId: string;
+  productId: string;
+  amountFen: number;
+  durationDays: number;
+  env: 0 | 1;
+  status: MembershipPaymentStatus;
+  transactionId: string | null;
+  paidAt: Date | null;
+  deliveredAt: Date | null;
+}
+
 export interface SessionRecord {
   id: string;
   userId: string;

@@ -1,4 +1,5 @@
 import { rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AppConfig } from "./config.js";
@@ -14,8 +15,15 @@ const config: AppConfig = {
   corsOrigin: "*",
   devLoginEnabled: true,
   sessionTtlDays: 30,
-  wechatAppId: "",
-  wechatAppSecret: "",
+  wechatAppId: "wx-test-app",
+  wechatAppSecret: "test-app-secret",
+  wechatMessageToken: "test-message-token",
+  wechatVirtualPaymentOfferId: "test-offer",
+  wechatVirtualPaymentAppKey: "test-app-key",
+  wechatVirtualPaymentProductId: "membership-year",
+  wechatVirtualPaymentEnv: 1,
+  membershipPriceFen: 9900,
+  membershipDurationDays: 365,
   azureTtsEndpoint: "",
   azureSpeechKey: "",
   azureSpeechRegion: "",
@@ -288,6 +296,115 @@ describe("English Start API", () => {
     const second = await redeemMembership(app, repository, headers, "ES7D-TEST-STACK-002");
     const secondExpiry = new Date(second.json<{ expiresAt: string }>().expiresAt);
     expect(secondExpiry.getTime() - firstExpiry.getTime()).toBe(7 * 86_400_000);
+  });
+
+  it("creates and confirms a virtual-payment membership order", async () => {
+    const repository = new MemoryAppRepository();
+    let queryCount = 0;
+    const app = await buildApp({
+      repository,
+      config,
+      wechatResolver: async () => ({
+        openId: "dev:learner-001",
+        sessionKey: "test-session-key"
+      }),
+      virtualPaymentQueryResolver: async () => {
+        queryCount += 1;
+        return {
+          status: 2,
+          paidFee: 9900,
+          paidAt: new Date("2026-09-06T04:00:00.000Z"),
+          transactionId: "wx-transaction-1"
+        };
+      }
+    });
+    apps.push(app);
+    const token = await login(app);
+    const headers = { authorization: `Bearer ${token}` };
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/membership/payment/orders",
+      headers,
+      payload: { code: "fresh-wechat-code" }
+    });
+    expect(created.statusCode).toBe(201);
+    const payment = created.json<{
+      payment: { outTradeNo: string; signData: string; paySig: string; signature: string };
+    }>().payment;
+    expect(JSON.parse(payment.signData)).toMatchObject({
+      productId: "membership-year",
+      goodsPrice: 9900,
+      outTradeNo: payment.outTradeNo
+    });
+    expect(payment.paySig).toHaveLength(64);
+    expect(payment.signature).toHaveLength(64);
+
+    const confirmed = await app.inject({
+      method: "POST",
+      url: `/membership/payment/orders/${payment.outTradeNo}/confirm`,
+      headers
+    });
+    expect(confirmed.statusCode).toBe(200);
+    expect(confirmed.json()).toMatchObject({
+      status: "DELIVERED",
+      membership: { active: true }
+    });
+
+    const repeated = await app.inject({
+      method: "POST",
+      url: `/membership/payment/orders/${payment.outTradeNo}/confirm`,
+      headers
+    });
+    expect(repeated.json()).toMatchObject({ status: "DELIVERED" });
+    expect(queryCount).toBe(1);
+  });
+
+  it("delivers membership once from a signed virtual-payment callback", async () => {
+    const repository = new MemoryAppRepository();
+    const app = await buildApp({
+      repository,
+      config,
+      wechatResolver: async () => ({
+        openId: "dev:learner-001",
+        sessionKey: "test-session-key"
+      })
+    });
+    apps.push(app);
+    const token = await login(app);
+    const headers = { authorization: `Bearer ${token}` };
+    const created = await app.inject({
+      method: "POST",
+      url: "/membership/payment/orders",
+      headers,
+      payload: { code: "fresh-wechat-code" }
+    });
+    const outTradeNo = created.json<{ payment: { outTradeNo: string } }>().payment.outTradeNo;
+    const timestamp = "1788681600";
+    const nonce = "callback-nonce";
+    const signature = createHash("sha1")
+      .update([config.wechatMessageToken, timestamp, nonce].sort().join(""))
+      .digest("hex");
+    const callbackUrl = `/wechat/xpay-callback?signature=${signature}&timestamp=${timestamp}&nonce=${nonce}`;
+    const payload = {
+      Event: "xpay_goods_deliver_notify",
+      OpenId: "dev:learner-001",
+      OutTradeNo: outTradeNo,
+      Env: 1,
+      WeChatPayInfo: { TransactionId: "wx-transaction-2", PaidTime: 1788681600 },
+      GoodsInfo: { ProductId: "membership-year", Quantity: 1, ActualPrice: 9900 }
+    };
+
+    const delivered = await app.inject({ method: "POST", url: callbackUrl, payload });
+    expect(delivered.statusCode).toBe(200);
+    expect(delivered.json()).toEqual({ ErrCode: 0, ErrMsg: "success" });
+    const firstMembership = await repository.getMembershipStatus({ userId: (await repository.ensureIdentity("dev:learner-001")).userId });
+    expect(firstMembership.active).toBe(true);
+
+    const repeated = await app.inject({ method: "POST", url: callbackUrl, payload });
+    expect(repeated.json()).toEqual({ ErrCode: 0, ErrMsg: "success" });
+    const secondMembership = await repository.getMembershipStatus({ userId: (await repository.ensureIdentity("dev:learner-001")).userId });
+    expect(secondMembership.expiresAt).toEqual(firstMembership.expiresAt);
   });
 
   it("switches the current user between member and free states in debug mode", async () => {

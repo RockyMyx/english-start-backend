@@ -6,9 +6,9 @@ services:
     environment:
       POSTGRES_DB: english_start
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - english_start_postgres_v2_data:/var/lib/postgresql/data
     healthcheck:
@@ -16,6 +16,50 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  migrate:
+    image: english-start-backend:local
+    profiles: ["deploy"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/english_start?schema=public
+    command: ["sh", "-lc", "npm run prisma:deploy && npm run db:seed"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+    image: english-start-backend:local
+    container_name: english-start-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/english_start?schema=public
+      HOST: 0.0.0.0
+      PORT: 3000
+      AVATAR_STORAGE_PATH: /app/storage/avatars
+    ports:
+      - "${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-3000}:3000"
+    volumes:
+      - ./storage/avatars:/app/storage/avatars
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   english_start_postgres_v2_data:
