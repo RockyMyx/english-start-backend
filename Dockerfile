@@ -12,6 +12,7 @@ COPY prisma.config.ts tsconfig.json vitest.config.ts ./
 COPY prisma ./prisma
 COPY src ./src
 COPY tools ./tools
+COPY images ./images
 
 # Prisma only needs a syntactically valid URL while generating the client.
 RUN DATABASE_URL=postgresql://unused:unused@localhost:5432/unused npm ci \

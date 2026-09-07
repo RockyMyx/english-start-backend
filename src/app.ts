@@ -178,6 +178,18 @@ export async function buildApp(options: BuildAppOptions) {
   }));
   app.get("/health", async () => ({ status: "ok" }));
 
+  app.get("/media/membership-product.png", async (_request, reply) => {
+    try {
+      const content = await readFile(path.resolve("images", "membership-year.png"));
+      return reply
+        .header("Content-Type", "image/png")
+        .header("Cache-Control", "public, max-age=604800")
+        .send(content);
+    } catch {
+      throw new AppError(404, "MEMBERSHIP_PRODUCT_IMAGE_NOT_FOUND", "会员商品图片不存在");
+    }
+  });
+
   app.get<{ Params: { fileName: string } }>("/media/avatars/:fileName", async (request, reply) => {
     const fileName = request.params.fileName;
     if (!/^[a-f0-9-]+\.(jpg|png|webp)$/.test(fileName)) {

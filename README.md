@@ -96,7 +96,16 @@ CentOS 7 会自动加载 `docker-compose.centos7.yml` 中的 PostgreSQL seccomp 
 | `MEMBERSHIP_PRICE_FEN` | 会员售价，单位分，默认 `9900` |
 | `MEMBERSHIP_DURATION_DAYS` | 会员有效天数，默认 `365` |
 
-修改价格时，必须同时修改微信虚拟支付后台对应道具的价格并重新发布，否则微信会拒绝下单。
+新版小程序后台可能不展示道具管理入口，道具需通过微信服务器 API 上传并发布。本项目已内置年度会员
+商品图，部署后可通过 `https://wx.rockyma.online/media/membership-product.png` 访问。在服务器执行：
+
+```bash
+docker compose exec api npm run membership:product:publish
+```
+
+工具会依次上传道具、等待上传完成、发布道具并确认发布结果。若域名发生变化，可通过
+`MEMBERSHIP_PRODUCT_IMAGE_URL` 或 `--image-url` 覆盖默认地址。修改价格时，必须修改
+`MEMBERSHIP_PRICE_FEN` 并重新上传、发布对应道具，否则微信会拒绝下单。
 消息推送 URL 配置为 `https://你的API域名/wechat/xpay-callback`，数据格式可使用 JSON 或 XML，
 消息加解密方式使用明文模式。
 

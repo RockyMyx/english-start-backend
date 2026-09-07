@@ -16,6 +16,7 @@
     "db:seed": "prisma db seed",
     "membership:codes": "tsx tools/generate-membership-codes.ts",
     "membership:codes:import": "tsx tools/import-membership-codes.ts",
+    "membership:product:publish": "tsx tools/publish-membership-product.ts",
     "postinstall": "prisma generate"
   },
   "dependencies": {

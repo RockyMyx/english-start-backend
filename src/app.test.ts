@@ -81,6 +81,20 @@ async function redeemMembership(
 }
 
 describe("English Start API", () => {
+  it("serves the membership product image", async () => {
+    const app = await buildApp({ repository: new MemoryAppRepository(), config });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/media/membership-product.png"
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toBe("image/png");
+    expect(response.rawPayload.length).toBeGreaterThan(0);
+  });
+
   it("keeps direct word entry for members only", async () => {
     const repository = new MemoryAppRepository();
     const app = await buildApp({ repository, config });

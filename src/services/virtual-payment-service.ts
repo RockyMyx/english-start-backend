@@ -193,22 +193,37 @@ async function getAccessToken(config: AppConfig): Promise<string> {
   return data.access_token;
 }
 
+export async function requestVirtualPaymentApi<T extends { errcode?: number; errmsg?: string }>(
+  config: AppConfig,
+  endpoint: string,
+  payload: Record<string, unknown>
+): Promise<T> {
+  requireVirtualPayment(config);
+  if (!/^\/xpay\/[a-z_]+$/.test(endpoint)) {
+    throw new AppError(500, "INVALID_XPAY_ENDPOINT", "虚拟支付接口地址不正确");
+  }
+  const body = JSON.stringify(payload);
+  const paySig = hmacSha256(config.wechatVirtualPaymentAppKey, `${endpoint}&${body}`);
+  const accessToken = await getAccessToken(config);
+  const query = new URLSearchParams({ access_token: accessToken, pay_sig: paySig });
+  const response = await fetch(`https://api.weixin.qq.com${endpoint}?${query}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body
+  });
+  const data = await response.json() as T;
+  if (!response.ok || data.errcode !== 0) {
+    throw new AppError(502, "XPAY_API_FAILED", data.errmsg || "微信虚拟支付接口调用失败");
+  }
+  return data;
+}
+
 export async function queryVirtualPaymentOrder(
   config: AppConfig,
   openId: string,
   outTradeNo: string
 ): Promise<VirtualPaymentQueryResult> {
-  requireVirtualPayment(config);
-  const body = JSON.stringify({ openid: openId, env: config.wechatVirtualPaymentEnv, order_id: outTradeNo });
-  const paySig = hmacSha256(config.wechatVirtualPaymentAppKey, `/xpay/query_order&${body}`);
-  const accessToken = await getAccessToken(config);
-  const query = new URLSearchParams({ access_token: accessToken, pay_sig: paySig });
-  const response = await fetch(`https://api.weixin.qq.com/xpay/query_order?${query}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body
-  });
-  const data = await response.json() as {
+  const data = await requestVirtualPaymentApi<{
     errcode?: number;
     errmsg?: string;
     order?: {
@@ -218,8 +233,12 @@ export async function queryVirtualPaymentOrder(
       wxpay_order_id?: string;
       channel_order_id?: string;
     };
-  };
-  if (!response.ok || data.errcode !== 0 || !data.order || typeof data.order.status !== "number") {
+  }>(config, "/xpay/query_order", {
+    openid: openId,
+    env: config.wechatVirtualPaymentEnv,
+    order_id: outTradeNo
+  });
+  if (!data.order || typeof data.order.status !== "number") {
     throw new AppError(502, "XPAY_QUERY_FAILED", data.errmsg || "查询会员支付结果失败");
   }
   return {
