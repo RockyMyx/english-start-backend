@@ -91,21 +91,90 @@ CentOS 7 会自动加载 `docker-compose.centos7.yml` 中的 PostgreSQL seccomp 
 | `WECHAT_MESSAGE_TOKEN` | 微信消息推送 Token，回调使用明文模式 |
 | `WECHAT_VIRTUAL_PAYMENT_OFFER_ID` | 虚拟支付基础配置中的 OfferId |
 | `WECHAT_VIRTUAL_PAYMENT_APP_KEY` | 与支付环境匹配的沙箱或现网 AppKey |
-| `WECHAT_VIRTUAL_PAYMENT_PRODUCT_ID` | 已上传、审核并发布的会员道具 ID |
+| `WECHAT_VIRTUAL_PAYMENT_PRODUCT_ID` | 兼容模式使用的已上传、发布会员商品ID |
 | `WECHAT_VIRTUAL_PAYMENT_ENV` | `0` 正式、`1` 沙箱；正式版必须为 `0` |
-| `MEMBERSHIP_PRICE_FEN` | 会员售价，单位分，默认 `9900` |
+| `MEMBERSHIP_PRICE_FEN` | 兼容模式会员售价，单位分，默认 `9900` |
 | `MEMBERSHIP_DURATION_DAYS` | 会员有效天数，默认 `365` |
+
+#### 测试1元 / 正式99元切换
+
+业务价格模式由后端 `MEMBERSHIP_PAYMENT_MODE` 控制，与 `NODE_ENV`、小程序开发版/体验版/正式版、
+微信的沙箱/现网环境相互独立。前端价格展示、下单签名和商品发布工具使用同一份选中的配置，
+无需修改前端或数据库。
+
+| 配置 | `test` 测试模式 | `live` 正式模式 |
+| --- | --- | --- |
+| 价格变量 | `MEMBERSHIP_TEST_PRICE_FEN`，默认 `100`（1元） | `MEMBERSHIP_LIVE_PRICE_FEN`，默认 `9900`（99元） |
+| 商品ID变量 | `MEMBERSHIP_TEST_PRODUCT_ID`，默认 `membership_year_test` | `MEMBERSHIP_LIVE_PRODUCT_ID`，默认 `membership_year` |
+| 会员时长 | 两种模式均使用 `MEMBERSHIP_DURATION_DAYS`，默认365天 | 同左 |
+
+未设置模式（或留空）时，兼容旧的 `MEMBERSHIP_PRICE_FEN` 和 `WECHAT_VIRTUAL_PAYMENT_PRODUCT_ID`。
+明确设置 `test/live` 后，旧价格和旧商品ID不再参与选择，避免旧测试价影响正式收款。
+无效模式、非正整数的新价格会使服务启动失败，不会悄悄使用另一种模式。
+
+服务器 `.env` 可以同时保存两套配置，后续只改模式这一行：
+
+```dotenv
+NODE_ENV=production
+DEV_LOGIN_ENABLED=false
+MEMBERSHIP_PAYMENT_MODE=test
+MEMBERSHIP_TEST_PRICE_FEN=100
+MEMBERSHIP_TEST_PRODUCT_ID=membership_year_test
+MEMBERSHIP_LIVE_PRICE_FEN=9900
+MEMBERSHIP_LIVE_PRODUCT_ID=membership_year
+MEMBERSHIP_DURATION_DAYS=365
+```
+
+若要验证真实1元扣款，另外设置 `WECHAT_VIRTUAL_PAYMENT_ENV=0`，并填写同一小程序对应的现网
+`WECHAT_VIRTUAL_PAYMENT_APP_KEY`。若只进行微信沙箱联调，则设置 `WECHAT_VIRTUAL_PAYMENT_ENV=1`
+并使用沙箱 AppKey。模式 `test` 不代表不扣款；实际扣款以支付渠道和账单为准，真实测试付款不会自动退回。
+渠道对价格档位的要求以微信校验为准。
+
+首次更新代码，在服务器后端仓库目录执行：
+
+```bash
+./deploy.sh --pull
+```
+
+以后只修改 `.env` 时，不必重新构建镜像或执行数据库迁移，执行下面的命令使新环境变量生效：
+
+```bash
+docker compose -p english-start -f docker-compose.yml up -d --no-deps --force-recreate api
+```
+
+其中 `english-start` 是 `deploy.sh` 的默认 Compose 项目名；若部署时自定义了
+`COMPOSE_PROJECT_NAME`，这里也要使用同一个项目名。仅 `docker restart` 不会更新环境变量。
+
+确认运行中的价格、商品ID和微信支付环境（不输出密钥）：
+
+```bash
+docker exec english-start-api node --input-type=module -e '
+import { loadConfig } from "./dist/src/config.js";
+const c = loadConfig();
+console.log({ mode: process.env.MEMBERSHIP_PAYMENT_MODE || "legacy", priceFen: c.membershipPriceFen, productId: c.wechatVirtualPaymentProductId, wechatEnv: c.wechatVirtualPaymentEnv });
+'
+```
+
+测试商品和正式商品需要分别在所使用的微信支付环境上传、发布。第一次切入一种模式时，执行下方的
+商品发布工具，确认发布成功并等待配置生效后再付款。已发布且价格未改变时，单纯切换模式不必重复发布。
+正式上线改为 `MEMBERSHIP_PAYMENT_MODE=live`，微信环境保持 `0`、使用现网 AppKey，重建API容器，
+确认正式商品已发布，再提交小程序审核发布。
+
+**全局模式会影响该后端的所有用户**。已经对外运营的后端不要切到 `test`；应使用独立测试后端，
+本次未增加测试账号白名单。测试付款仍发放365天会员；退款接口及退款后自动回收会员权益尚未实现。
+切换前完成正在支付的订单，尤其不要在订单处理中改变微信沙箱/现网环境。
 
 新版小程序后台可能不展示道具管理入口，道具需通过微信服务器 API 上传并发布。本项目已内置年度会员
 商品图，部署后可通过 `https://wx.rockyma.online/media/membership-product.png` 访问。在服务器执行：
 
 ```bash
-docker compose exec api npm run membership:product:publish
+docker exec english-start-api npm run membership:product:publish
 ```
 
 工具会依次上传道具、等待上传完成、发布道具并确认发布结果。若域名发生变化，可通过
 `MEMBERSHIP_PRODUCT_IMAGE_URL` 或 `--image-url` 覆盖默认地址。修改价格时，必须修改
-`MEMBERSHIP_PRICE_FEN` 并重新上传、发布对应道具，否则微信会拒绝下单。
+当前模式的价格配置（兼容模式使用 `MEMBERSHIP_PRICE_FEN`），并重新上传、发布相应商品，
+否则微信会拒绝下单。建议新价格使用新的商品ID，避免影响已发布的旧商品。
 消息推送 URL 配置为 `https://你的API域名/wechat/xpay-callback`，数据格式可使用 JSON 或 XML，
 消息加解密方式使用明文模式。
 

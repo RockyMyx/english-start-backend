@@ -41,6 +41,32 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   return Math.floor(positiveNumber(value, fallback));
 }
 
+function membershipPaymentConfig(): Pick<AppConfig, "membershipPriceFen" | "wechatVirtualPaymentProductId"> {
+  const mode = process.env.MEMBERSHIP_PAYMENT_MODE?.trim() || "";
+  if (!mode) {
+    return {
+      membershipPriceFen: positiveInteger(process.env.MEMBERSHIP_PRICE_FEN, 9900),
+      wechatVirtualPaymentProductId: process.env.WECHAT_VIRTUAL_PAYMENT_PRODUCT_ID || ""
+    };
+  }
+  if (mode !== "test" && mode !== "live") {
+    throw new Error("MEMBERSHIP_PAYMENT_MODE 必须为 test 或 live");
+  }
+
+  // 显式模式不读取旧配置，避免测试价残留导致正式环境误收低价。
+  const prefix = `MEMBERSHIP_${mode.toUpperCase()}`;
+  const priceValue = process.env[`${prefix}_PRICE_FEN`]?.trim();
+  const priceFen = priceValue ? Number(priceValue) : mode === "test" ? 100 : 9900;
+  if (!Number.isSafeInteger(priceFen) || priceFen <= 0) {
+    throw new Error(`${prefix}_PRICE_FEN 必须是正整数，单位为分`);
+  }
+  return {
+    membershipPriceFen: priceFen,
+    wechatVirtualPaymentProductId: process.env[`${prefix}_PRODUCT_ID`]?.trim()
+      || (mode === "test" ? "membership_year_test" : "membership_year")
+  };
+}
+
 export function loadConfig(): AppConfig {
   const requestedEvaluator = process.env.AI_EVALUATION_PROVIDER;
   const aiEvaluationProvider =
@@ -62,9 +88,8 @@ export function loadConfig(): AppConfig {
     wechatMessageToken: process.env.WECHAT_MESSAGE_TOKEN || "",
     wechatVirtualPaymentOfferId: process.env.WECHAT_VIRTUAL_PAYMENT_OFFER_ID || "",
     wechatVirtualPaymentAppKey: process.env.WECHAT_VIRTUAL_PAYMENT_APP_KEY || "",
-    wechatVirtualPaymentProductId: process.env.WECHAT_VIRTUAL_PAYMENT_PRODUCT_ID || "",
     wechatVirtualPaymentEnv: process.env.WECHAT_VIRTUAL_PAYMENT_ENV === "1" ? 1 : 0,
-    membershipPriceFen: positiveInteger(process.env.MEMBERSHIP_PRICE_FEN, 9900),
+    ...membershipPaymentConfig(),
     membershipDurationDays: positiveInteger(process.env.MEMBERSHIP_DURATION_DAYS, 365),
     azureTtsEndpoint: process.env.AZURE_TTS_ENDPOINT || "",
     azureSpeechKey: process.env.AZURE_TTS_KEY || "",

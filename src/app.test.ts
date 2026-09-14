@@ -97,6 +97,8 @@ describe("English Start API", () => {
     expect(response.rawPayload.subarray(0, 8)).toEqual(
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
     );
+    expect(response.rawPayload.readUInt32BE(16)).toBe(200);
+    expect(response.rawPayload.readUInt32BE(20)).toBe(200);
   });
 
   it("keeps direct word entry for members only", async () => {
