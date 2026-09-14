@@ -93,6 +93,10 @@ describe("English Start API", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toBe("image/png");
     expect(response.rawPayload.length).toBeGreaterThan(0);
+    expect(response.rawPayload.length).toBeLessThan(200_000);
+    expect(response.rawPayload.subarray(0, 8)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    );
   });
 
   it("keeps direct word entry for members only", async () => {
