@@ -476,6 +476,18 @@ describe("English Start API", () => {
     });
     expect(response.statusCode).toBe(404);
     expect(response.json()).toMatchObject({ error: "NOT_FOUND" });
+
+    for (const endpoint of [
+      { method: "POST" as const, url: "/auth/dev-login" },
+      { method: "DELETE" as const, url: "/assessments/initial/dev-reset" }
+    ]) {
+      const disabled = await app.inject({
+        ...endpoint,
+        headers: { authorization: `Bearer ${token}` }
+      });
+      expect(disabled.statusCode).toBe(404);
+      expect(disabled.json()).toMatchObject({ error: "NOT_FOUND" });
+    }
   });
 
   it("collects multiple learning goals and completes an isolated initial assessment", async () => {
