@@ -8,7 +8,7 @@ import type {
 } from "../domain/types.js";
 import { AppError } from "../lib/errors.js";
 
-export const AGE_BANDS = ["3-5", "6-7", "8-9", "10-12", "13+"] as const;
+export const AGE_BANDS = ["3-5", "6-7", "8-9", "10-12", "13+", "14+"] as const;
 export const GRADE_LEVELS = [
   "PRESCHOOL",
   "GRADE_1",

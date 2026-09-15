@@ -16,6 +16,7 @@ import type {
 import { AppError } from "./lib/errors.js";
 import type { AppRepository } from "./repositories/app-repository.js";
 import { AuthService } from "./services/auth-service.js";
+import { PRIVACY_POLICY_VERSION } from "./services/privacy-service.js";
 import {
   AGE_BANDS,
   ENGLISH_EXPERIENCES,
@@ -136,6 +137,44 @@ export async function buildApp(options: BuildAppOptions) {
   const { repository, config } = options;
   const auth = new AuthService(repository, config);
   const app = Fastify({ logger: config.nodeEnv !== "test", bodyLimit: 1_000_000 });
+
+  // 学习数据写入必须具有当前指引同意；登录、支付通知与受生产保护的调试接口不受此钩子影响。
+  app.addHook("preHandler", async (request) => {
+    const route = request.routeOptions.url;
+    const writesLearningData = ["POST", "PUT", "PATCH", "DELETE"].includes(request.method) || route === "/daily-plans/today";
+    if (!writesLearningData || !route ||
+      route.startsWith("/auth/") || route.startsWith("/wechat/") ||
+      route === "/privacy/consent" || route.includes("/dev-") ||
+      !["/words", "/profile", "/onboarding", "/assessments", "/practice", "/sentences", "/dialogues", "/me", "/check-ins", "/daily-plans", "/review", "/starter-pack", "/speech", "/membership"].some((prefix) => route === prefix || route.startsWith(`${prefix}/`))) return;
+    const current = await auth.authenticate(request.headers.authorization);
+    const consent = await repository.getPrivacyConsent(current.context, PRIVACY_POLICY_VERSION);
+    if (!consent) throw new AppError(403, "PRIVACY_CONSENT_REQUIRED", "请先阅读并同意学习信息处理指引");
+  });
+
+  app.get("/privacy/consent", async (request) => {
+    const current = await auth.authenticate(request.headers.authorization);
+    const consent = await repository.getPrivacyConsent(current.context, PRIVACY_POLICY_VERSION);
+    return { accepted: !!consent, policyVersion: PRIVACY_POLICY_VERSION, role: consent?.role || null, consentedAt: consent?.consentedAt || null };
+  });
+
+  app.post("/privacy/consent", async (request) => {
+    const current = await auth.authenticate(request.headers.authorization);
+    const body = bodyRecord(request);
+    if (body.accepted !== true || body.policyVersion !== PRIVACY_POLICY_VERSION ||
+      (body.role !== "GUARDIAN" && body.role !== "SELF_14_PLUS")) {
+      throw new AppError(400, "INVALID_PRIVACY_CONSENT", "请明确同意当前指引并选择使用身份");
+    }
+    if (body.role === "SELF_14_PLUS") {
+      const profile = await repository.getLearnerProfile(current.context);
+      if (profile.ageBand && profile.ageBand !== "14+") {
+        throw new AppError(403, "GUARDIAN_CONSENT_REQUIRED", "当前年龄资料须由监护人同意；如资料有误请联系客服更正");
+      }
+    }
+    const consent = await repository.savePrivacyConsent(current.context, {
+      policyVersion: PRIVACY_POLICY_VERSION, role: body.role, consentedAt: new Date()
+    });
+    return { accepted: true, ...consent };
+  });
 
   await app.register(cors, {
     origin: config.corsOrigin === "*" ? true : config.corsOrigin
@@ -436,6 +475,10 @@ export async function buildApp(options: BuildAppOptions) {
       learningGoals
     };
     validateLearnerProfile(profileInput);
+    const consent = await repository.getPrivacyConsent(current.context, PRIVACY_POLICY_VERSION);
+    if (profileInput.ageBand !== "14+" && consent?.role !== "GUARDIAN") {
+      throw new AppError(403, "GUARDIAN_CONSENT_REQUIRED", "不满14周岁的学习资料须先取得监护人同意");
+    }
     return repository.updateLearnerProfile(current.context, {
       ageBand: profileInput.ageBand,
       gradeLevel: profileInput.gradeLevel,

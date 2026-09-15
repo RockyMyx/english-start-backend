@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
     "typecheck": "tsc --noEmit",
+    "typecheck:privacy-tools": "tsc -p tsconfig.tools.json",
     "test": "vitest run",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
@@ -15,6 +16,7 @@
     "prisma:studio": "prisma studio",
     "db:seed": "prisma db seed",
     "membership:codes": "tsx tools/generate-membership-codes.ts",
+    "privacy:erase-learning-data": "tsx tools/erase-learning-data.ts",
     "membership:codes:import": "tsx tools/import-membership-codes.ts",
     "membership:product:publish": "tsx tools/publish-membership-product.ts",
     "postinstall": "prisma generate"

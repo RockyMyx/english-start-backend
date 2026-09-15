@@ -29,7 +29,11 @@ import type {
   WordRecord
 } from "../domain/types.js";
 
+import type { PrivacyConsent } from "../services/privacy-service.js";
+
 export interface AppRepository {
+  getPrivacyConsent(context: IdentityContext, policyVersion: string): Promise<PrivacyConsent | null>;
+  savePrivacyConsent(context: IdentityContext, input: PrivacyConsent): Promise<PrivacyConsent>;
   ensureIdentity(openId: string): Promise<IdentityContext>;
   createSession(input: {
     userId: string;

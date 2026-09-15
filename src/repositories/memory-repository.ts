@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { PrivacyConsent } from "../services/privacy-service.js";
 import type {
   AttemptInput,
   CheckInSummary,
@@ -199,6 +200,16 @@ function normalized(value: string): string {
 }
 
 export class MemoryAppRepository implements AppRepository {
+  private privacyConsents = new Map<string, PrivacyConsent>();
+
+  async getPrivacyConsent(context: IdentityContext, policyVersion: string): Promise<PrivacyConsent | null> {
+    return this.privacyConsents.get(`${context.userId}:${policyVersion}`) || null;
+  }
+
+  async savePrivacyConsent(context: IdentityContext, input: PrivacyConsent): Promise<PrivacyConsent> {
+    this.privacyConsents.set(`${context.userId}:${input.policyVersion}`, input);
+    return input;
+  }
   private users: MemoryUser[] = [];
   private sessions: Array<SessionRecord & { tokenHash: string }> = [];
   private membershipCodes: Array<{

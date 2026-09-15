@@ -8,7 +8,7 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-COPY prisma.config.ts tsconfig.json vitest.config.ts ./
+COPY prisma.config.ts tsconfig.json tsconfig.tools.json vitest.config.ts ./
 COPY prisma ./prisma
 COPY src ./src
 COPY tools ./tools
@@ -17,6 +17,7 @@ COPY images ./images
 # Prisma only needs a syntactically valid URL while generating the client.
 RUN DATABASE_URL=postgresql://unused:unused@localhost:5432/unused npm ci \
   && npm run typecheck \
+  && npm run typecheck:privacy-tools \
   && npm test \
   && npm run build
 

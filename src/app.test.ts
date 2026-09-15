@@ -48,14 +48,19 @@ afterEach(async () => {
   await Promise.all(apps.splice(0).map((app) => app.close()));
 });
 
-async function login(app: Awaited<ReturnType<typeof buildApp>>) {
+async function login(app: Awaited<ReturnType<typeof buildApp>>, grantConsent = true) {
   const response = await app.inject({
     method: "POST",
     url: "/auth/dev-login",
     payload: { openId: "learner-001" }
   });
   expect(response.statusCode).toBe(200);
-  return response.json<{ token: string }>().token;
+  const token = response.json<{ token: string }>().token;
+  if (grantConsent) {
+    const consent = await app.inject({ method: "POST", url: "/privacy/consent", headers: { authorization: `Bearer ${token}` }, payload: { accepted: true, role: "GUARDIAN", policyVersion: "2026-09-15" } });
+    expect(consent.statusCode).toBe(200);
+  }
+  return token;
 }
 
 async function redeemMembership(
@@ -81,6 +86,79 @@ async function redeemMembership(
 }
 
 describe("English Start API", () => {
+  it("records explicit current-policy consent with a server timestamp and protects learning writes", async () => {
+    const repository = new MemoryAppRepository();
+    const app = await buildApp({ repository, config });
+    apps.push(app);
+    const headers = { authorization: `Bearer ${await login(app, false)}` };
+    const initial = await app.inject({ method: "GET", url: "/privacy/consent", headers });
+    expect(initial.json()).toMatchObject({ accepted: false, role: null });
+    const denied = await app.inject({ method: "POST", url: "/starter-pack/import", headers });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error).toBe("PRIVACY_CONSENT_REQUIRED");
+    const before = Date.now();
+    const accepted = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "GUARDIAN", policyVersion: "2026-09-15", consentedAt: "2000-01-01" } });
+    expect(accepted.statusCode).toBe(200);
+    expect(new Date(accepted.json().consentedAt).getTime()).toBeGreaterThanOrEqual(before);
+    const imported = await app.inject({ method: "POST", url: "/starter-pack/import", headers });
+    expect(imported.statusCode).toBe(201);
+    const second = await app.inject({ method: "POST", url: "/auth/dev-login", payload: { openId: "other-consent-user" } });
+    const other = await app.inject({ method: "GET", url: "/privacy/consent", headers: { authorization: `Bearer ${second.json().token}` } });
+    expect(other.json().accepted).toBe(false);
+    const unsigned = await app.inject({ method: "GET", url: "/privacy/consent" });
+    expect(unsigned.statusCode).toBe(401);
+  });
+
+  it("rejects implicit consent, outdated versions and invalid roles", async () => {
+    const app = await buildApp({ repository: new MemoryAppRepository(), config });
+    apps.push(app);
+    const headers = { authorization: `Bearer ${await login(app, false)}` };
+    for (const payload of [
+      { accepted: false, role: "GUARDIAN", policyVersion: "2026-09-15" },
+      { accepted: "true", role: "GUARDIAN", policyVersion: "2026-09-15" },
+      { accepted: true, role: "OTHER", policyVersion: "2026-09-15" },
+      { accepted: true, role: "GUARDIAN", policyVersion: "old" }
+    ]) {
+      const result = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload });
+      expect(result.statusCode).toBe(400);
+    }
+    const state = await app.inject({ method: "GET", url: "/privacy/consent", headers });
+    expect(state.json().accepted).toBe(false);
+  });
+
+  it("requires guardian consent for child age bands, including legacy 13+", async () => {
+    const repository = new MemoryAppRepository();
+    const app = await buildApp({ repository, config });
+    apps.push(app);
+    const headers = { authorization: `Bearer ${await login(app, false)}` };
+    const accepted = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "SELF_14_PLUS", policyVersion: "2026-09-15" } });
+    expect(accepted.statusCode).toBe(200);
+    await redeemMembership(app, repository, headers);
+    const profile = { ageBand: "13+", gradeLevel: "GRADE_6_PLUS", englishExperience: "NONE", learningGoals: ["BALANCED"] };
+    const denied = await app.inject({ method: "PUT", url: "/onboarding/profile", headers, payload: profile });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error).toBe("GUARDIAN_CONSENT_REQUIRED");
+    const guardian = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "GUARDIAN", policyVersion: "2026-09-15" } });
+    expect(guardian.statusCode).toBe(200);
+    const saved = await app.inject({ method: "PUT", url: "/onboarding/profile", headers, payload: profile });
+    expect(saved.statusCode).toBe(200);
+    const downgrade = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "SELF_14_PLUS", policyVersion: "2026-09-15" } });
+    expect(downgrade.statusCode).toBe(403);
+  });
+
+  it("allows self consent for a learner explicitly aged 14 or above", async () => {
+    const repository = new MemoryAppRepository();
+    const app = await buildApp({ repository, config });
+    apps.push(app);
+    const headers = { authorization: `Bearer ${await login(app, false)}` };
+    const accepted = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "SELF_14_PLUS", policyVersion: "2026-09-15" } });
+    expect(accepted.statusCode).toBe(200);
+    await redeemMembership(app, repository, headers);
+    const saved = await app.inject({ method: "PUT", url: "/onboarding/profile", headers, payload: { ageBand: "14+", gradeLevel: "GRADE_6_PLUS", englishExperience: "NONE", learningGoals: ["BALANCED"] } });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().ageBand).toBe("14+");
+  });
+
   it("serves the membership product image", async () => {
     const app = await buildApp({ repository: new MemoryAppRepository(), config });
     apps.push(app);

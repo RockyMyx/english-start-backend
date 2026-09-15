@@ -1,4 +1,5 @@
 import { PrismaPg } from "@prisma/adapter-pg";
+import type { PrivacyConsent } from "../services/privacy-service.js";
 import { PrismaClient, type Prisma } from "../generated/prisma/client.js";
 import type {
   AttemptInput,
@@ -150,6 +151,22 @@ function dailyPlanTasks(value: unknown): DailyPlanTask[] {
 
 export class PrismaAppRepository implements AppRepository {
   readonly client: PrismaClient;
+
+  async getPrivacyConsent(context: IdentityContext, policyVersion: string): Promise<PrivacyConsent | null> {
+    const row = await this.client.userPrivacyConsent.findUnique({
+      where: { userId_policyVersion: { userId: context.userId, policyVersion } }
+    });
+    return row ? { policyVersion: row.policyVersion, role: row.role as PrivacyConsent["role"], consentedAt: row.consentedAt } : null;
+  }
+
+  async savePrivacyConsent(context: IdentityContext, input: PrivacyConsent): Promise<PrivacyConsent> {
+    await this.client.userPrivacyConsent.upsert({
+      where: { userId_policyVersion: { userId: context.userId, policyVersion: input.policyVersion } },
+      create: { userId: context.userId, ...input },
+      update: input
+    });
+    return input;
+  }
 
   constructor(connectionString: string) {
     this.client = new PrismaClient({

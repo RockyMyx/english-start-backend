@@ -54,8 +54,20 @@ model User {
   redeemedMembershipCodes MembershipRedemptionCode[]
   membershipPaymentOrders MembershipPaymentOrder[]
   initialAssessments InitialAssessment[]
+  privacyConsents UserPrivacyConsent[]
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
+}
+
+model UserPrivacyConsent {
+  id            String   @id @default(uuid())
+  userId        String
+  policyVersion String
+  role          String
+  consentedAt   DateTime @default(now())
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, policyVersion])
 }
 
 model InitialAssessment {
