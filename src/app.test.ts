@@ -86,16 +86,19 @@ async function redeemMembership(
 }
 
 describe("English Start API", () => {
-  it("records explicit current-policy consent with a server timestamp and protects learning writes", async () => {
+  it("records consent when needed without blocking normal learning on startup", async () => {
     const repository = new MemoryAppRepository();
     const app = await buildApp({ repository, config });
     apps.push(app);
     const headers = { authorization: `Bearer ${await login(app, false)}` };
     const initial = await app.inject({ method: "GET", url: "/privacy/consent", headers });
     expect(initial.json()).toMatchObject({ accepted: false, role: null });
-    const denied = await app.inject({ method: "POST", url: "/starter-pack/import", headers });
-    expect(denied.statusCode).toBe(403);
-    expect(denied.json().error).toBe("PRIVACY_CONSENT_REQUIRED");
+    const importedWithoutCustomConsent = await app.inject({ method: "POST", url: "/starter-pack/import", headers });
+    expect(importedWithoutCustomConsent.statusCode).toBe(201);
+    const dashboard = await app.inject({ method: "GET", url: "/me", headers });
+    expect(dashboard.statusCode).toBe(200);
+    const plan = await app.inject({ method: "GET", url: "/daily-plans/today", headers });
+    expect(plan.statusCode).toBe(200);
     const before = Date.now();
     const accepted = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "GUARDIAN", policyVersion: "2026-09-15", consentedAt: "2000-01-01" } });
     expect(accepted.statusCode).toBe(200);
