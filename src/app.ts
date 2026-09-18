@@ -148,10 +148,10 @@ export async function buildApp(options: BuildAppOptions) {
     const current = await auth.authenticate(request.headers.authorization);
     const body = bodyRecord(request);
     if (body.accepted !== true || body.policyVersion !== PRIVACY_POLICY_VERSION ||
-      (body.role !== "GUARDIAN" && body.role !== "SELF_14_PLUS")) {
-      throw new AppError(400, "INVALID_PRIVACY_CONSENT", "请明确同意当前指引并选择使用身份");
+      (body.role !== "GENERAL" && body.role !== "GUARDIAN" && body.role !== "SELF_14_PLUS")) {
+      throw new AppError(400, "INVALID_PRIVACY_CONSENT", "请明确同意当前隐私保护指引");
     }
-    if (body.role === "SELF_14_PLUS") {
+    if (body.role !== "GUARDIAN") {
       const profile = await repository.getLearnerProfile(current.context);
       if (profile.ageBand && profile.ageBand !== "14+") {
         throw new AppError(403, "GUARDIAN_CONSENT_REQUIRED", "当前年龄资料须由监护人同意；如资料有误请联系客服更正");

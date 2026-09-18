@@ -57,7 +57,7 @@ async function login(app: Awaited<ReturnType<typeof buildApp>>, grantConsent = t
   expect(response.statusCode).toBe(200);
   const token = response.json<{ token: string }>().token;
   if (grantConsent) {
-    const consent = await app.inject({ method: "POST", url: "/privacy/consent", headers: { authorization: `Bearer ${token}` }, payload: { accepted: true, role: "GUARDIAN", policyVersion: "2026-09-15" } });
+    const consent = await app.inject({ method: "POST", url: "/privacy/consent", headers: { authorization: `Bearer ${token}` }, payload: { accepted: true, role: "GUARDIAN", policyVersion: "2026-09-18" } });
     expect(consent.statusCode).toBe(200);
   }
   return token;
@@ -100,8 +100,9 @@ describe("English Start API", () => {
     const plan = await app.inject({ method: "GET", url: "/daily-plans/today", headers });
     expect(plan.statusCode).toBe(200);
     const before = Date.now();
-    const accepted = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "GUARDIAN", policyVersion: "2026-09-15", consentedAt: "2000-01-01" } });
+    const accepted = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "GENERAL", policyVersion: "2026-09-18", consentedAt: "2000-01-01" } });
     expect(accepted.statusCode).toBe(200);
+    expect(accepted.json().role).toBe("GENERAL");
     expect(new Date(accepted.json().consentedAt).getTime()).toBeGreaterThanOrEqual(before);
     const imported = await app.inject({ method: "POST", url: "/starter-pack/import", headers });
     expect(imported.statusCode).toBe(201);
@@ -117,9 +118,9 @@ describe("English Start API", () => {
     apps.push(app);
     const headers = { authorization: `Bearer ${await login(app, false)}` };
     for (const payload of [
-      { accepted: false, role: "GUARDIAN", policyVersion: "2026-09-15" },
-      { accepted: "true", role: "GUARDIAN", policyVersion: "2026-09-15" },
-      { accepted: true, role: "OTHER", policyVersion: "2026-09-15" },
+      { accepted: false, role: "GUARDIAN", policyVersion: "2026-09-18" },
+      { accepted: "true", role: "GUARDIAN", policyVersion: "2026-09-18" },
+      { accepted: true, role: "OTHER", policyVersion: "2026-09-18" },
       { accepted: true, role: "GUARDIAN", policyVersion: "old" }
     ]) {
       const result = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload });
@@ -134,18 +135,18 @@ describe("English Start API", () => {
     const app = await buildApp({ repository, config });
     apps.push(app);
     const headers = { authorization: `Bearer ${await login(app, false)}` };
-    const accepted = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "SELF_14_PLUS", policyVersion: "2026-09-15" } });
+    const accepted = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "GENERAL", policyVersion: "2026-09-18" } });
     expect(accepted.statusCode).toBe(200);
     await redeemMembership(app, repository, headers);
     const profile = { ageBand: "13+", gradeLevel: "GRADE_6_PLUS", englishExperience: "NONE", learningGoals: ["BALANCED"] };
     const denied = await app.inject({ method: "PUT", url: "/onboarding/profile", headers, payload: profile });
     expect(denied.statusCode).toBe(403);
     expect(denied.json().error).toBe("GUARDIAN_CONSENT_REQUIRED");
-    const guardian = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "GUARDIAN", policyVersion: "2026-09-15" } });
+    const guardian = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "GUARDIAN", policyVersion: "2026-09-18" } });
     expect(guardian.statusCode).toBe(200);
     const saved = await app.inject({ method: "PUT", url: "/onboarding/profile", headers, payload: profile });
     expect(saved.statusCode).toBe(200);
-    const downgrade = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "SELF_14_PLUS", policyVersion: "2026-09-15" } });
+    const downgrade = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "SELF_14_PLUS", policyVersion: "2026-09-18" } });
     expect(downgrade.statusCode).toBe(403);
   });
 
@@ -154,7 +155,7 @@ describe("English Start API", () => {
     const app = await buildApp({ repository, config });
     apps.push(app);
     const headers = { authorization: `Bearer ${await login(app, false)}` };
-    const accepted = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "SELF_14_PLUS", policyVersion: "2026-09-15" } });
+    const accepted = await app.inject({ method: "POST", url: "/privacy/consent", headers, payload: { accepted: true, role: "SELF_14_PLUS", policyVersion: "2026-09-18" } });
     expect(accepted.statusCode).toBe(200);
     await redeemMembership(app, repository, headers);
     const saved = await app.inject({ method: "PUT", url: "/onboarding/profile", headers, payload: { ageBand: "14+", gradeLevel: "GRADE_6_PLUS", englishExperience: "NONE", learningGoals: ["BALANCED"] } });
