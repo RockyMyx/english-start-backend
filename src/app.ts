@@ -776,6 +776,11 @@ export async function buildApp(options: BuildAppOptions) {
     return { words: await repository.listWords(current.context) };
   });
 
+  app.get("/words/examples", async (request) => {
+    const current = await auth.authenticate(request.headers.authorization);
+    return { examples: await repository.listWordExamples(current.context) };
+  });
+
   app.post("/words", async (request, reply) => {
     const current = await auth.authenticate(request.headers.authorization);
     await requireMembership(repository, current.context);

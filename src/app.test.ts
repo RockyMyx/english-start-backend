@@ -86,6 +86,26 @@ async function redeemMembership(
 }
 
 describe("English Start API", () => {
+  it("returns only vocabulary-covered word examples for the signed-in learner", async () => {
+    const app = await buildApp({ repository: new MemoryAppRepository(), config });
+    apps.push(app);
+    const unsigned = await app.inject({ method: "GET", url: "/words/examples" });
+    expect(unsigned.statusCode).toBe(401);
+
+    const headers = { authorization: `Bearer ${await login(app)}` };
+    const beforeImport = await app.inject({ method: "GET", url: "/words/examples", headers });
+    expect(beforeImport.json()).toEqual({ examples: [] });
+
+    await app.inject({ method: "POST", url: "/starter-pack/import", headers });
+    const result = await app.inject({ method: "GET", url: "/words/examples", headers });
+    expect(result.statusCode).toBe(200);
+    expect(result.json().examples).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ english: "I am eight.", chinese: "我八岁。" })
+      ])
+    );
+  });
+
   it("records consent when needed without blocking normal learning on startup", async () => {
     const repository = new MemoryAppRepository();
     const app = await buildApp({ repository, config });

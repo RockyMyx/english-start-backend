@@ -26,6 +26,7 @@ import type {
   AssessmentScores,
   AssessmentDifficulty,
   WordInput,
+  WordExampleRecord,
   WordRecord
 } from "../domain/types.js";
 
@@ -136,6 +137,7 @@ export interface AppRepository {
   listStarterWords(): Promise<StarterWordRecord[]>;
   importStarterPack(context: IdentityContext): Promise<{ imported: number; total: number }>;
   listWords(context: IdentityContext): Promise<WordRecord[]>;
+  listWordExamples(context: IdentityContext): Promise<WordExampleRecord[]>;
   getWord(context: IdentityContext, wordId: string): Promise<WordRecord | null>;
   addWord(context: IdentityContext, input: WordInput): Promise<WordRecord>;
   addWords(context: IdentityContext, inputs: WordInput[]): Promise<WordRecord[]>;

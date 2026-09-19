@@ -31,6 +31,7 @@ import type {
   StarterWordRecord,
   UserProfile,
   WordInput,
+  WordExampleRecord,
   WordRecord
 } from "../domain/types.js";
 import {
@@ -42,6 +43,7 @@ import {
 import { buildReviewOverview } from "../domain/review.js";
 import { DAILY_SCORE_GOAL, scoreForAttempt } from "../domain/scoring.js";
 import { sentenceCanUseVocabulary } from "../domain/sentence-coverage.js";
+import { buildWordExamples } from "../domain/word-example.js";
 import {
   initialReviewSchedule,
   updateReviewSchedule
@@ -974,6 +976,10 @@ export class MemoryAppRepository implements AppRepository {
           .map((attempt) => attempt.mode)
       )
     }));
+  }
+
+  async listWordExamples(context: IdentityContext): Promise<WordExampleRecord[]> {
+    return buildWordExamples(this.user(context).words, sentencePrompts);
   }
 
   async getWord(context: IdentityContext, wordId: string): Promise<WordRecord | null> {

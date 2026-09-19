@@ -203,6 +203,15 @@ export interface WordRecord {
   mastery?: WordMastery;
 }
 
+export interface WordExampleRecord {
+  wordId: string;
+  english: string;
+  chinese: string;
+  before: string;
+  focus: string;
+  after: string;
+}
+
 export type WordMasteryStepKey =
   | "RECOGNITION"
   | "LISTENING"

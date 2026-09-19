@@ -32,6 +32,7 @@ import type {
   StarterWordRecord,
   UserProfile,
   WordInput,
+  WordExampleRecord,
   WordRecord
 } from "../domain/types.js";
 import {
@@ -43,6 +44,7 @@ import {
 import { buildReviewOverview } from "../domain/review.js";
 import { DAILY_SCORE_GOAL, scoreForAttempt } from "../domain/scoring.js";
 import { sentenceCanUseVocabulary } from "../domain/sentence-coverage.js";
+import { buildWordExamples } from "../domain/word-example.js";
 import {
   initialReviewSchedule,
   updateReviewSchedule
@@ -1111,6 +1113,21 @@ export class PrismaAppRepository implements AppRepository {
       lastPracticedAt: word.progress?.lastPracticedAt || null,
       mastery: buildWordMastery(word.practiceAttempts.map((attempt) => attempt.mode))
     }));
+  }
+
+  async listWordExamples(context: IdentityContext): Promise<WordExampleRecord[]> {
+    const [words, sentences] = await Promise.all([
+      this.client.vocabularyItem.findMany({
+        where: { userId: context.userId, archivedAt: null },
+        select: { id: true, english: true }
+      }),
+      this.client.sentencePrompt.findMany({
+        where: { active: true },
+        select: { referenceAnswer: true, promptChinese: true },
+        orderBy: { sortOrder: "asc" }
+      })
+    ]);
+    return buildWordExamples(words, sentences);
   }
 
   async getWord(context: IdentityContext, wordId: string): Promise<WordRecord | null> {
